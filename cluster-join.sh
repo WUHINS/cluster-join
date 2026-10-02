@@ -355,6 +355,9 @@ lang_load_en() {
     T_DL_NODIR='destination directory does not exist:'
     T_BIN_EMPTY='downloaded file is empty:'
     T_BIN_SMALL='downloaded file is suspiciously small (truncated download?):'
+    T_DL_BAD_CONTENT='HTTP 200 but the content is not a binary; trying the next source:'
+    T_DL_BYTES='bytes, magic'
+    T_DL_ALL_BAD_CONTENT='every source returned a non-binary response; a captive portal or interception is likely'
     T_BIN_NOT_EXEC='downloaded file is not an executable (HTML / error page / captive portal?):'
     T_BIN_NOT_EXEC_MAGIC='first bytes:'
     T_BIN_NOT_EXEC_HINT='a captive portal or transparent proxy often returns HTTP 200 with an HTML page; retry with --gh-proxy, --proxy or --resin'
@@ -635,6 +638,9 @@ lang_load_zh() {
     T_DL_NODIR='目标目录不存在:'
     T_BIN_EMPTY='下载到的文件为空:'
     T_BIN_SMALL='下载到的文件异常偏小（可能被截断）:'
+    T_DL_BAD_CONTENT='返回 HTTP 200 但内容不是二进制，换下一个源:'
+    T_DL_BYTES='字节，文件头'
+    T_DL_ALL_BAD_CONTENT='所有源返回的都不是二进制，很可能被门户页 / 劫持拦截'
     T_BIN_NOT_EXEC='下载到的不是可执行文件（HTML / 错误页 / 门户页？）:'
     T_BIN_NOT_EXEC_MAGIC='文件头字节:'
     T_BIN_NOT_EXEC_HINT='门户页或透明代理常返回 HTTP 200 + 一段 HTML；请改用 --gh-proxy / --proxy / --resin 重试'
@@ -1259,6 +1265,23 @@ wget_reason() {
 # 校验拿到的确实是可执行文件（ELF / Mach-O）。
 # 门户页、透明代理、被拦截的下载常常返回 HTTP 200 + 一段 HTML，
 # 若不校验，后面会以「二进制不支持某参数」这种完全误导的方式失败。
+# 文件头 4 字节（十六进制），用于诊断
+file_magic() {
+    head -c 4 "$1" 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n'
+}
+
+# 静默判断是否为可执行文件（ELF / Mach-O）。
+# 取不到魔数（head/od 不可用）时不阻塞流程，返回 0。
+is_executable_file() {
+    [ -s "$1" ] || return 1
+    case "$(file_magic "$1")" in
+        7f454c46*) return 0 ;;                                        # ELF
+        cffaedfe*|cefaedfe*|cafebabe*|feedface*|feedfacf*) return 0 ;; # Mach-O / fat
+        '') return 0 ;;
+    esac
+    return 1
+}
+
 verify_executable() {
     _ve_file=$1; _ve_label=${2:-binary}
     if [ ! -s "$_ve_file" ]; then
@@ -1271,16 +1294,13 @@ verify_executable() {
     if [ "$_ve_sz" -lt 1048576 ]; then
         warn "$T_BIN_SMALL $_ve_label $_ve_sz"
     fi
-    _ve_magic=$(head -c 4 "$_ve_file" 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n')
-    case "$_ve_magic" in
-        7f454c46*) return 0 ;;                                        # ELF
-        cffaedfe*|cefaedfe*|cafebabe*|feedface*|feedfacf*) return 0 ;; # Mach-O / fat
-        '') return 0 ;;   # 取不到魔数（head/od 不可用）时不阻塞流程
-    esac
-    err "$T_BIN_NOT_EXEC $_ve_label"
-    dim "$T_BIN_NOT_EXEC_MAGIC $_ve_magic"
-    dim "$T_BIN_NOT_EXEC_HINT"
-    return 1
+    if ! is_executable_file "$_ve_file"; then
+        err "$T_BIN_NOT_EXEC $_ve_label"
+        dim "$T_BIN_NOT_EXEC_MAGIC $(file_magic "$_ve_file")"
+        dim "$T_BIN_NOT_EXEC_HINT"
+        return 1
+    fi
+    return 0
 }
 
 # 下载前确认目标目录存在且可写：否则 curl 的写失败会被笼统报成「下载失败」，
@@ -1386,8 +1406,11 @@ dl_hint() {
     dim "$T_DL_HINT_GENERIC"
 }
 
+# dl <url> <out> <label> [expect]
+#   expect=binary 时逐个候选校验文件内容：门户页/透明代理会返回 HTTP 200 + HTML，
+#   此时应当换下一个源（镜像往往没被拦截），而不是直接放弃。
 dl() {
-    _dl_url=$1; _dl_out=$2; _dl_label=${3:-file}
+    _dl_url=$1; _dl_out=$2; _dl_label=${3:-file}; _dl_expect=${4:-}
     if [ "$DRY_RUN" = 1 ]; then
         printf '%s[dry-run]%s download %s -> %s\n' "$c_ylw" "$c_rst" "$_dl_url" "$_dl_out"
         return 0
@@ -1395,10 +1418,17 @@ dl() {
     dl_precheck_dir "$_dl_out" || return 1
     _dl_ok=0
     _dl_reasons=''
+    _dl_badcontent=0
     for _dl_u in $(url_candidates "$_dl_url"); do
         dim "$_dl_u"
         rm -f "$_dl_out" 2>/dev/null || :
         if http_to_file "$_dl_u" "$_dl_out" && [ -s "$_dl_out" ]; then
+            if [ "$_dl_expect" = binary ] && ! is_executable_file "$_dl_out"; then
+                _dl_badcontent=1
+                warn "$T_DL_BAD_CONTENT $_dl_u ($(wc -c <"$_dl_out" 2>/dev/null | tr -d ' ') $T_DL_BYTES $(file_magic "$_dl_out"))"
+                rm -f "$_dl_out" 2>/dev/null || :
+                continue
+            fi
             _dl_ok=1
             break
         fi
@@ -1414,6 +1444,9 @@ dl() {
     done
     if [ "$_dl_ok" != 1 ]; then
         err "$_dl_label: $T_DL_FAILED"
+        if [ "$_dl_badcontent" = 1 ]; then
+            warn "$T_DL_ALL_BAD_CONTENT"
+        fi
         if [ -n "$_dl_reasons" ]; then
             dim "$T_DL_REASONS"
             printf '%s\n' "$_dl_reasons"
@@ -2489,7 +2522,7 @@ install_komari() {
         info "$T_NODL_USING $KOMARI_BIN"
     else
         _ik_stage="$KOMARI_DIR/.agent.new.$$"
-        if ! dl "$_ik_url" "$_ik_stage" 'Komari Agent'; then
+        if ! dl "$_ik_url" "$_ik_stage" 'Komari Agent' binary; then
             run rm -f "$_ik_stage"
             return 1
         fi
