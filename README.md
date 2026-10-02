@@ -27,6 +27,7 @@
 | **管道执行**（`curl … \| sudo sh -s -- …`） | `stdin` 被脚本占用，脚本自动改从 `/dev/tty` 读输入，提问依旧可用 |
 | **无终端 / 无人值守** | 全部走命令行参数与环境变量，**绝不挂起**；未提供的项使用默认值 |
 | **`sh` 与 `bash`** | 纯 POSIX 语法，在 dash / ash / busybox sh / bash / mksh 下均可运行 |
+| **zsh** | 支持，但需要脚本开头的兼容守卫：zsh 默认**不做单词分割**且未匹配 glob 会直接报错（`nomatch`），与 POSIX sh 语义不符。脚本检测到 `ZSH_VERSION` 会自动执行 `emulate -R sh` 切到 sh 模拟，并**自检分词是否真的可用**——不可用就明确报错，而不是静默装错 |
 
 脚本只有 `--yes` 或没有 TTY 时才走非交互分支；两者都不满足时会给出明确报错而不是静默乱装。
 
@@ -400,6 +401,22 @@ sudo sh cluster-join.sh --fetch --fetch-tool neofetch --yes
 支持的 fastfetch 预编译架构：`amd64` / `aarch64` / `armv7l` / `i686` / `loongarch64` / `ppc64le` / `riscv64` / `s390x`。
 neofetch 是 bash 脚本，没有 bash 的系统会明确报错而不是装一半。
 
+**关于 zsh**：脚本可以直接用 `zsh cluster-join.sh ...` 运行。zsh 默认不分割未加引号的变量
+（`for x in $LIST` 只会迭代一次），而本脚本有 15 处依赖分词——镜像列表、代理参数、架构候选等，
+不分词会让整串被当成单个参数，表现为**下载静默失败**。脚本开头的守卫会处理：
+
+```sh
+if [ -n "${ZSH_VERSION:-}" ]; then
+    emulate -R sh 2>/dev/null || :
+    # 自检：确认分词真的可用；不可用则报错退出，而不是装错
+    ...
+fi
+```
+
+实测（zsh 5.9）：`url_candidates` 输出 4 个候选与 sh 一致，真实下载 12,585,218 字节成功；
+`sh` / `dash` / `bash` 不受影响（它们没有 `emulate`，守卫整体跳过）。
+以 `zsh` 名字调用（自动 sh 模拟）也正常。
+
 > 已安装则直接跳过；`--with-fetch` 只在并网动作成功后追加执行。
 
 #### 让它在登录时显示（含 Komari 探针终端）
@@ -682,7 +699,7 @@ sudo sh cluster-join.sh --uninstall --yes --purge
 - EasyTier `v2.6.4`：`easytier-core -w/--config-server`、`--machine-id`、`--config-dir`、`easytier-cli service install`、`easytier-web-embed --api-server-port/--config-server-port/--config-server-protocol/--api-host/--db`
 - Komari Agent：`-e/--endpoint`、`-t/--token`、`--auto-discovery`、`-i/--interval`、`--disable-web-ssh`、`-u/--ignore-unsafe-cert`
 
-脚本自身已在 `dash` 与 `bash` 下通过语法校验（40 项回归全绿），覆盖：交互式问答流程、管道/无终端流程、
+脚本自身已在 `dash` / `bash` / `zsh 5.9` 下实测通过（40 项回归全绿），覆盖：交互式问答流程、管道/无终端流程、
 `--dry-run`、`--emit-cmd`、`--status`、`--et-mode off` 不启用并网、非法模式报错、
 批量参数透传与失败汇总、配置读写往返（含 `'`、`=`、空格的敏感值），
 以及"安装路径在注册自启动后立即返回"（安装函数内无 `sleep`、无存活检查）。

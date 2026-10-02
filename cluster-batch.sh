@@ -32,6 +32,24 @@
 #    ops@10.0.0.4:2222
 #===============================================================================
 
+# --- 运行环境自检 ---------------------------------------------------------
+# zsh 默认**不做单词分割**，且未匹配的 glob 会直接报错（nomatch），
+# 与本脚本依赖的 POSIX sh 语义不符（镜像列表、代理参数、架构候选等 15 处依赖分词，
+# 不分词会让整串被当成单个参数，表现为下载静默失败）。
+# 切到 zsh 的 sh 模拟；其他 shell 没有 emulate，会被 if 跳过。
+if [ -n "${ZSH_VERSION:-}" ]; then
+    emulate -R sh 2>/dev/null || :
+    # 自检：确认分词真的可用。宁可明确报错，也不要静默装错东西。
+    _sc_probe='a b'
+    _sc_n=0
+    for _sc_x in $_sc_probe; do _sc_n=$((_sc_n + 1)); done
+    if [ "$_sc_n" != 2 ]; then
+        printf 'ERROR: this script requires POSIX sh word splitting.\n' >&2
+        printf '       请改用 sh 或 bash 运行，例如: sh %s ...\n' "$0" >&2
+        exit 1
+    fi
+    unset _sc_probe _sc_n _sc_x
+fi
 BATCH_VERSION='1.0.1'
 
 HOSTS_FILE=''
