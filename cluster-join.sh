@@ -102,6 +102,8 @@ RESIN_TOKEN=${RESIN_TOKEN:-}       # Resin 反向代理 token（URL 路径段）
 RESIN_ACCOUNT=${RESIN_ACCOUNT:-}   # Resin [Platform.]Account，可选
 CURL_PROXY_ARGS=''
 WGET_PROXY_ENV=''
+ALT_SCREEN=${ALT_SCREEN:-}         # '' = auto（交互 TTY 时启用）| 1 | 0
+ALT_SCREEN_ON=0                    # 当前是否处于备用屏
 LOG_TO_FILE=0
 SERVICE_MODE=''          # systemd | openrc | procd | manual
 OS_NAME=''
@@ -815,6 +817,47 @@ setup_colors() {
 setup_colors
 
 _ts() { date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo '-'; }
+
+# ---- 备用屏（alternate screen）----
+# 像 vim/less 一样接管整屏，退出时把原屏幕内容原样还回来。
+# 只在「有控制终端 + stdout 是终端 + TERM 可用」时启用：
+# stdout 若被重定向到文件，绝不能把转义序列写进去。
+ALT_SEQ_ENTER=''
+ALT_SEQ_LEAVE=''
+alt_screen_supported() {
+    [ "$ALT_SCREEN" = 0 ] && return 1
+    [ "$HAVE_TTY" = 1 ] || return 1
+    [ -t 1 ] 2>/dev/null || return 1
+    case "${TERM:-}" in ''|dumb) return 1 ;; esac
+    return 0
+}
+
+alt_screen_seq() { # alt_screen_seq <smcup|rmcup> <xterm 回退序列>
+    _as_cap=$1; _as_fb=$2; _as_out=''
+    if have tput; then
+        _as_out=$(tput "$_as_cap" 2>/dev/null) || _as_out=''
+    fi
+    [ -n "$_as_out" ] || _as_out=$_as_fb
+    printf '%s' "$_as_out"
+}
+
+alt_screen_enter() {
+    [ "$ALT_SCREEN_ON" = 1 ] && return 0
+    alt_screen_supported || return 0
+    ALT_SEQ_ENTER=$(alt_screen_seq smcup "$(printf '\033[?1049h')")
+    printf '%s' "$ALT_SEQ_ENTER"
+    printf '\033[2J\033[H'   # 清屏并把光标归位，避免看到上一轮残留
+    ALT_SCREEN_ON=1
+    return 0
+}
+
+alt_screen_leave() {
+    [ "$ALT_SCREEN_ON" = 1 ] || return 0
+    ALT_SEQ_LEAVE=$(alt_screen_seq rmcup "$(printf '\033[?1049l')")
+    printf '%s' "$ALT_SEQ_LEAVE"
+    ALT_SCREEN_ON=0
+    return 0
+}
 
 # emit <color> <tag> <message...>
 emit() {
@@ -1556,6 +1599,10 @@ General:
       --with-fetch             Also install fastfetch/neofetch after a successful join
       --fetch-tool TOOL        auto (default) | fastfetch | neofetch
       --ip-family FAMILY       auto (default) | 4 | 6 -- force the host IP family
+      --alt-screen / --no-alt-screen
+                               Take over the screen like vim (default: on for an
+                               interactive terminal). The final summary is printed
+                               after leaving it so it stays in the scrollback.
       --no-download            Never download; require pre-placed binaries
                                (for IPv6-only / air-gapped hosts)
       --proxy URL              HTTP/SOCKS5 forward proxy, e.g. http://127.0.0.1:2260
@@ -1685,6 +1732,9 @@ $APP_NAME v$APP_VERSION —— 服务器集群并网（Komari Agent + EasyTier �
       --with-fetch             并网成功后追加安装 fastfetch/neofetch
       --fetch-tool TOOL        auto（默认）| fastfetch | neofetch
       --ip-family FAMILY       auto（默认）| 4 | 6，强制本机地址族
+      --alt-screen / --no-alt-screen
+                               像 vim 一样接管整屏（交互终端下默认开启）。
+                               汇总会在退出备用屏之后再打印，因此会留在 scrollback 里。
       --no-download            完全不下载，只使用预置二进制
                                （供纯 IPv6 / 离线环境使用）
       --proxy URL              HTTP/SOCKS5 正向代理，如 http://127.0.0.1:2260
@@ -1815,6 +1865,8 @@ parse_args() {
             --fetch-tool=*)       FETCH_TOOL=${_pa_a#*=} ;;
             --fetch-motd)         FETCH_MOTD=1 ;;
             --no-download)        NO_DOWNLOAD=1 ;;
+            --alt-screen)         ALT_SCREEN=1 ;;
+            --no-alt-screen)      ALT_SCREEN=0 ;;
             --proxy)              need_val "$_pa_a" "${2:-}"; PROXY_URL=$2; shift ;;
             --proxy=*)            PROXY_URL=${_pa_a#*=} ;;
             --proxy-auth)         need_val "$_pa_a" "${2:-}"; PROXY_AUTH=$2; shift ;;
@@ -3152,6 +3204,7 @@ _svc_display() {
 # 15. 状态查看
 #-------------------------------------------------------------------------------
 do_status() {
+    alt_screen_leave
     step "$T_STEP_STATUS"
     printf '%s%-18s %-22s %s%s\n' "$c_bold" "$T_ST_COMPONENT" "$T_ST_SERVICE" "$T_ST_STATUS" "$c_rst"
     hr
@@ -3200,6 +3253,7 @@ do_status() {
 # 16. 卸载
 #-------------------------------------------------------------------------------
 do_uninstall() {
+    alt_screen_leave
     step "$T_STEP_UNINSTALL $UNINSTALL_TARGET)"
     if ! confirm_or_die "$T_CONFIRM_UNINSTALL"; then
         return 1
@@ -3259,6 +3313,7 @@ do_uninstall() {
 # 17. 输出标准下发命令（供 cluster-batch.sh / 人工复制）
 #-------------------------------------------------------------------------------
 emit_cmd() {
+    alt_screen_leave
     _ec='sudo sh cluster-join.sh --all --yes'
     [ -n "$KOMARI_ENDPOINT" ] && _ec="$_ec --komari-endpoint '$KOMARI_ENDPOINT'"
     if [ -n "$KOMARI_AD_KEY" ]; then
@@ -3391,6 +3446,7 @@ lang_switch_menu() {
 
 interactive_loop() {
     while :; do
+        alt_screen_enter
         printf '\n'
         hr
         printf '%s  %s%s\n' "$c_bold" "$T_HR_TITLE_MAIN" "$c_rst"
@@ -3434,6 +3490,7 @@ interactive_loop() {
 # 19. 动作分发
 #-------------------------------------------------------------------------------
 run_action() {
+    alt_screen_enter
     case "$ACTION" in
         all)
             preflight
@@ -3483,6 +3540,8 @@ fetch_after_join() {
 }
 
 print_summary() {
+    # 汇总要留在 scrollback 里给用户看，先退出备用屏
+    alt_screen_leave
     printf '\n'
     hr
     ok "$T_SUMMARY_DONE"
@@ -3506,6 +3565,7 @@ print_summary() {
 #-------------------------------------------------------------------------------
 cleanup() {
     _stty_echo_on
+    alt_screen_leave
     if [ -n "${TMP_DIR:-}" ] && [ -d "$TMP_DIR" ]; then
         rm -rf "$TMP_DIR" 2>/dev/null || :
     fi
