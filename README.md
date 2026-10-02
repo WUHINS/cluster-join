@@ -13,6 +13,7 @@
 | `cluster-batch.sh` | 跳板机侧脚本：把 `cluster-join.sh` 并行下发到几十上百台机器 |
 | `hosts.txt.example` | 批量下发的主机清单示例 |
 | `cluster.env.example` | 节点配置样例（也可直接用环境变量） |
+| `LICENSE` | MIT 许可证 |
 
 ---
 
@@ -554,3 +555,9 @@ sudo sh cluster-join.sh --uninstall --yes --purge
 以及"安装路径在注册自启动后立即返回"（安装函数内无 `sleep`、无存活检查）。
 
 语言策略的验证覆盖：`HAVE_TTY=1` 时无论 locale 一律英文；非 TTY 下 `zh_CN/zh_TW` 走中文、`en_US` 与无 locale 走英文；`--lang` / `CLUSTER_JOIN_LANG` 覆盖生效；英文模式下 `--help`、`--status`、安装流程、批量流程的输出经字节扫描确认 **零非 ASCII 字符**。
+
+---
+
+## 许可证
+
+[MIT License](LICENSE) © 2026 WUHINS
