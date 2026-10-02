@@ -332,6 +332,12 @@ sudo sh cluster-join.sh --all --yes \
 **Resin 反向代理**（URL 式）：
 
 ```sh
+# 可以把网关里看到的地址整段粘进来（自动拆成 入口/token/Account）
+... | sudo sh -s -- --all --yes \
+    --resin http://127.0.0.1:2260/my-token/Default.user_tom \
+    -e https://面板 --komari-ad-key 'AD-XXXX'
+
+# 也可以分开写
 ... | sudo sh -s -- --all --yes \
     --resin http://127.0.0.1:2260 --resin-token my-token \
     --resin-account Default.user_tom \
@@ -349,6 +355,15 @@ http://127.0.0.1:2260/my-token/Default.user_tom/https/api.github.com/repos/a/b/r
 > **为什么要自己跟重定向**：GitHub release 下载会 302 跳到 `objects.githubusercontent.com`。
 > 如果用 `curl -L`，curl 会拿绝对地址直连那一跳，**绕过 Resin**（受限网络下直接失败）。
 > 所以反向代理模式下脚本自己逐跳跟随并重新包装，实测第二跳仍然带着 token 经过 Resin。
+
+**容错设计**（重要）：
+
+- **逐跳跟随重定向**：网关把 GitHub 的 302 透传回来时，第二跳会被重新包装，不会绕过网关
+- **5xx/超时自动重试**：网关上游抖动很常见，实测有网关会返回 `502/504 Upstream connection or response timed out`；
+  脚本重试 2 次，并把**网关的错误正文原样贴出来**，而不是只说一句"下载失败"
+- **网关全失败后回退直连/镜像**：网关上游不通时不该让整台机器装不上
+- **截断与内容校验**：`Content-Length` 与实际落盘大小不符、curl 退出码 18（连接提前关闭）、
+  文件头不是 ELF/Mach-O、或拿到二进制却跑不起来——都会判定失败并**自动换下一个源**
 
 **该选哪个**：`--proxy` 正向代理更稳（重定向透明）；`--resin` 反向代理适合客户端只能改 BaseURL、
 无法配置代理的环境。两者可同时使用。

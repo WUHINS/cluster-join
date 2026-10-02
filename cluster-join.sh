@@ -102,6 +102,7 @@ RESIN_TOKEN=${RESIN_TOKEN:-}       # Resin 反向代理 token（URL 路径段）
 RESIN_ACCOUNT=${RESIN_ACCOUNT:-}   # Resin [Platform.]Account，可选
 CURL_PROXY_ARGS=''
 WGET_PROXY_ENV=''
+HTTP_NO_RESIN=0                   # 1 = 本次请求绕过 Resin（用于回退）
 ALT_SCREEN=${ALT_SCREEN:-}         # '' = auto（交互 TTY 时启用）| 1 | 0
 ALT_SCREEN_ON=0                    # 当前是否处于备用屏
 LOG_TO_FILE=0
@@ -189,6 +190,7 @@ apply_defaults() {
     [ -n "$IP_FAMILY" ] || IP_FAMILY='auto'
     [ -n "$NO_GH_PROXY" ] || NO_GH_PROXY=0
     build_proxy_args
+    parse_resin_url
     return 0
 }
 
@@ -335,6 +337,9 @@ lang_load_en() {
     T_IP_FAMILY_BAD='Invalid --ip-family (expected auto|4|6):'
     T_RESIN_NEED_TOKEN='--resin requires --resin-token (the <token> path segment)'
     T_RESIN_USING='Resin reverse proxy:'
+    T_RESIN_RETRY='Resin gateway returned 5xx/timeout, retrying:'
+    T_DL_FALLBACK_DIRECT='Resin failed for every source; falling back to direct / mirrors:'
+    T_RESIN_TAIL_IGNORED='(--resin: only the <token>/[Platform.]Account prefix is used; the rest is ignored)'
     T_RESIN_REDIRECT_NOTE='redirects are followed manually so every hop stays inside Resin'
     T_PROXY_USING='Outbound proxy:'
     T_NET_IPV6_ONLY='IPv6-only host detected'
@@ -362,7 +367,7 @@ lang_load_en() {
     T_BIN_NOT_EXEC_MAGIC='first bytes:'
     T_BIN_NOT_EXEC_HINT='a captive portal or transparent proxy often returns HTTP 200 with an HTML page; retry with --gh-proxy, --proxy or --resin'
     T_KOMARI_BIN_BROKEN='the komari-agent binary at this path does not run:'
-    T_KOMARI_BIN_BROKEN_HINT='the download was probably not a real binary; delete it and retry, or use --gh-proxy / --proxy / --resin'
+    T_KOMARI_BIN_BROKEN_HINT='the download was truncated or is not a real binary; delete it and retry, or use --gh-proxy / --proxy / --resin'
     T_DL_NOWRITE='destination directory is not writable:'
     T_DL_HINT_RESIN='a Resin reverse proxy is configured and may be unreachable:'
     T_DL_HINT_PROXY='a forward proxy is configured and may be unreachable:'
@@ -375,6 +380,8 @@ lang_load_en() {
     T_E_HTTP='HTTP error (403/404/...)'
     T_E_WRITE='cannot write to the destination'
     T_E_TIMEOUT='timeout'
+    T_E_TRUNCATED='transfer truncated (got/expected bytes):'
+    T_E_TRUNCATED_SIMPLE='transfer truncated (connection closed early)'
     T_E_TLS='TLS/SSL handshake failed'
     T_E_RECV='connection reset while receiving'
     T_E_RESIN='Resin reverse-proxy request failed'
@@ -618,6 +625,9 @@ lang_load_zh() {
     T_IP_FAMILY_BAD='--ip-family 取值无效（应为 auto|4|6）:'
     T_RESIN_NEED_TOKEN='使用 --resin 时必须同时给 --resin-token（URL 里的 <token> 段）'
     T_RESIN_USING='Resin 反向代理:'
+    T_RESIN_RETRY='Resin 网关返回 5xx/超时，重试第'
+    T_DL_FALLBACK_DIRECT='Resin 对所有源均失败，回退到直连 / 镜像:'
+    T_RESIN_TAIL_IGNORED='（--resin：只取 <token>/[Platform.]Account 前缀，其余部分忽略）'
     T_RESIN_REDIRECT_NOTE='重定向由脚本自行跟随，保证每一跳都在 Resin 内'
     T_PROXY_USING='出网代理:'
     T_NET_IPV6_ONLY='检测到纯 IPv6 主机'
@@ -645,7 +655,7 @@ lang_load_zh() {
     T_BIN_NOT_EXEC_MAGIC='文件头字节:'
     T_BIN_NOT_EXEC_HINT='门户页或透明代理常返回 HTTP 200 + 一段 HTML；请改用 --gh-proxy / --proxy / --resin 重试'
     T_KOMARI_BIN_BROKEN='该路径下的 komari-agent 无法运行:'
-    T_KOMARI_BIN_BROKEN_HINT='下载到的很可能不是真二进制；删掉后重试，或用 --gh-proxy / --proxy / --resin'
+    T_KOMARI_BIN_BROKEN_HINT='下载可能被截断或不是真二进制；删掉后重试，或用 --gh-proxy / --proxy / --resin'
     T_DL_NOWRITE='目标目录不可写:'
     T_DL_HINT_RESIN='已配置 Resin 反向代理，可能不可达:'
     T_DL_HINT_PROXY='已配置正向代理，可能不可达:'
@@ -658,6 +668,8 @@ lang_load_zh() {
     T_E_HTTP='HTTP 错误（403/404 等）'
     T_E_WRITE='无法写入目标文件'
     T_E_TIMEOUT='超时'
+    T_E_TRUNCATED='传输被截断（实收/应收字节）:'
+    T_E_TRUNCATED_SIMPLE='传输被截断（连接提前关闭）'
     T_E_TLS='TLS/SSL 握手失败'
     T_E_RECV='接收过程中连接被重置'
     T_E_RESIN='Resin 反向代理请求失败'
@@ -1166,6 +1178,33 @@ build_proxy_args() {
     return 0
 }
 
+# --resin 允许直接给完整前缀：
+#   http://host:port[/<token>[/<Platform.Account>]]
+# 这样用户可以把网关里看到的地址整段粘进来，不必再拆成三个参数。
+parse_resin_url() {
+    [ -n "$RESIN_URL" ] || return 0
+    case "$RESIN_URL" in
+        *://*) : ;;
+        *) return 0 ;;
+    esac
+    _pr_scheme=${RESIN_URL%%://*}
+    _pr_rest=${RESIN_URL#*://}
+    _pr_hostport=${_pr_rest%%/*}
+    _pr_path=${_pr_rest#"$_pr_hostport"}
+    _pr_path=${_pr_path#/}
+    RESIN_URL="${_pr_scheme}://${_pr_hostport}"
+    [ -n "$_pr_path" ] || return 0
+    _pr_tok=${_pr_path%%/*}
+    _pr_tail=${_pr_path#"$_pr_tok"}
+    _pr_tail=${_pr_tail#/}
+    _pr_acct=${_pr_tail%%/*}
+    [ -n "$RESIN_TOKEN" ] || RESIN_TOKEN=$_pr_tok
+    [ -n "$RESIN_ACCOUNT" ] || RESIN_ACCOUNT=$_pr_acct
+    [ -n "$_pr_acct" ] && [ "$_pr_acct" != "$_pr_tail" ] && \
+        dim "$T_RESIN_TAIL_IGNORED"
+    return 0
+}
+
 # 把普通 URL 包成 Resin 反向代理 URL：
 #   http://host:port/<token>/[Platform.]Account/<proto>/<target-host><path>
 resin_wrap() {
@@ -1188,6 +1227,8 @@ resin_wrap() {
 resin_to_file() {
     _rtf_url=$1; _rtf_out=$2
     _rtf_i=0
+    _rtf_try=0
+    RESIN_ERR=''
     while [ "$_rtf_i" -lt 6 ]; do
         _rtf_px=$(resin_wrap "$_rtf_url")
         # shellcheck disable=SC2086
@@ -1199,8 +1240,21 @@ resin_to_file() {
             2*) return 0 ;;
             3*) [ -n "$_rtf_loc" ] || return 1
                 _rtf_url=$_rtf_loc
-                _rtf_i=$((_rtf_i + 1)) ;;
-            *)  return 1 ;;
+                _rtf_i=$((_rtf_i + 1))
+                _rtf_try=0 ;;
+            5*|000)
+                # 网关上游超时很常见（实测 502/504，5~12s），值一次重试
+                if [ "$_rtf_try" -lt 2 ]; then
+                    _rtf_try=$((_rtf_try + 1))
+                    dim "$T_RESIN_RETRY $_rtf_try"
+                    sleep 2
+                    continue
+                fi
+                RESIN_ERR=$(head -c 200 "$_rtf_out" 2>/dev/null | tr -d '\r\n')
+                [ -n "$RESIN_ERR" ] || RESIN_ERR="HTTP $_rtf_code"
+                return 1 ;;
+            *)  RESIN_ERR="HTTP $_rtf_code"
+                return 1 ;;
         esac
     done
     return 1
@@ -1244,6 +1298,7 @@ curl_reason() {
         7)  printf '%s' "$T_E_CONNECT" ;;
         22) printf '%s' "$T_E_HTTP" ;;
         23) printf '%s' "$T_E_WRITE" ;;
+        18) printf '%s' "$T_E_TRUNCATED_SIMPLE" ;;
         28) printf '%s' "$T_E_TIMEOUT" ;;
         35|51|53|54|55|58|59|60|66|77|80|82|83|90|91) printf '%s' "$T_E_TLS" ;;
         56) printf '%s' "$T_E_RECV" ;;
@@ -1323,16 +1378,42 @@ dl_precheck_dir() {
 http_to_file() {
     _hf_url=$1; _hf_out=$2
     HTTP_ERR=''
-    if [ -n "$RESIN_URL" ]; then
-        resin_to_file "$_hf_url" "$_hf_out" || HTTP_ERR="$T_E_RESIN"
-        return $?
+    if [ -n "$RESIN_URL" ] && [ "$HTTP_NO_RESIN" != 1 ]; then
+        if ! resin_to_file "$_hf_url" "$_hf_out"; then
+            if [ -n "$RESIN_ERR" ]; then
+                HTTP_ERR="$T_E_RESIN ($RESIN_ERR)"
+            else
+                HTTP_ERR="$T_E_RESIN"
+            fi
+            return 1
+        fi
+        return 0
     fi
     if have curl; then
+        _hf_hdr="${TMP_DIR:-/tmp}/.cjhdr.$$"
         # shellcheck disable=SC2086
         curl $CURL_FAMILY $CURL_PROXY_ARGS -fL --connect-timeout 15 --retry 2 \
-            -o "$_hf_out" "$_hf_url" >/dev/null 2>&1
+            -D "$_hf_hdr" -o "$_hf_out" "$_hf_url" >/dev/null 2>&1
         _hf_rc=$?
-        [ "$_hf_rc" = 0 ] || HTTP_ERR=$(curl_reason "$_hf_rc")
+        if [ "$_hf_rc" = 0 ]; then
+            # 截断检测：服务端声明的 Content-Length 与实际落盘大小不符时，
+            # curl 仍可能返回 0（连接被中途"正常"关闭）。截断的 ELF 仍带合法魔数，
+            # 只靠魔数无法发现，必须比对长度。
+            _hf_want=$(grep -i '^content-length:' "$_hf_hdr" 2>/dev/null | tail -n1 | tr -d '\r' | awk '{print $2}')
+            _hf_got=$(wc -c <"$_hf_out" 2>/dev/null | tr -d ' ')
+            case "$_hf_want" in ''|*[!0-9]*) : ;; *)
+                case "$_hf_got" in ''|*[!0-9]*) : ;; *)
+                    if [ "$_hf_want" != "$_hf_got" ]; then
+                        HTTP_ERR="$T_E_TRUNCATED $_hf_got/$_hf_want"
+                        rm -f "$_hf_hdr" 2>/dev/null || :
+                        return 1
+                    fi ;;
+                esac ;;
+            esac
+        else
+            HTTP_ERR=$(curl_reason "$_hf_rc")
+        fi
+        rm -f "$_hf_hdr" 2>/dev/null || :
         return $_hf_rc
     elif have wget; then
         # shellcheck disable=SC2086
@@ -1419,29 +1500,42 @@ dl() {
     _dl_ok=0
     _dl_reasons=''
     _dl_badcontent=0
-    for _dl_u in $(url_candidates "$_dl_url"); do
-        dim "$_dl_u"
-        rm -f "$_dl_out" 2>/dev/null || :
-        if http_to_file "$_dl_u" "$_dl_out" && [ -s "$_dl_out" ]; then
-            if [ "$_dl_expect" = binary ] && ! is_executable_file "$_dl_out"; then
-                _dl_badcontent=1
-                warn "$T_DL_BAD_CONTENT $_dl_u ($(wc -c <"$_dl_out" 2>/dev/null | tr -d ' ') $T_DL_BYTES $(file_magic "$_dl_out"))"
-                rm -f "$_dl_out" 2>/dev/null || :
-                continue
-            fi
-            _dl_ok=1
-            break
+    # 第一轮经 Resin（若配置）；全部失败后第二轮退回直连/镜像——
+    # 网关上游不通时不该让整台机器装不上；内容校验会挡住被劫持的响应。
+    for _dl_pass in 1 2; do
+        if [ "$_dl_pass" = 1 ]; then
+            [ -n "$RESIN_URL" ] || continue
+            HTTP_NO_RESIN=0
+        else
+            HTTP_NO_RESIN=1
+            [ -n "$RESIN_URL" ] && dim "$T_DL_FALLBACK_DIRECT"
         fi
-        if [ -n "$HTTP_ERR" ]; then
-            if [ -n "$_dl_reasons" ]; then
-                _dl_reasons="$_dl_reasons
+        for _dl_u in $(url_candidates "$_dl_url"); do
+            dim "$_dl_u"
+            rm -f "$_dl_out" 2>/dev/null || :
+            if http_to_file "$_dl_u" "$_dl_out" && [ -s "$_dl_out" ]; then
+                if [ "$_dl_expect" = binary ] && ! is_executable_file "$_dl_out"; then
+                    _dl_badcontent=1
+                    warn "$T_DL_BAD_CONTENT $_dl_u ($(wc -c <"$_dl_out" 2>/dev/null | tr -d ' ') $T_DL_BYTES $(file_magic "$_dl_out"))"
+                    rm -f "$_dl_out" 2>/dev/null || :
+                    continue
+                fi
+                _dl_ok=1
+                break
+            fi
+            if [ -n "$HTTP_ERR" ]; then
+                if [ -n "$_dl_reasons" ]; then
+                    _dl_reasons="$_dl_reasons
   - $HTTP_ERR"
-            else
-                _dl_reasons="  - $HTTP_ERR"
+                else
+                    _dl_reasons="  - $HTTP_ERR"
+                fi
             fi
-        fi
-        rm -f "$_dl_out" 2>/dev/null || :
+            rm -f "$_dl_out" 2>/dev/null || :
+        done
+        [ "$_dl_ok" = 1 ] && break
     done
+    HTTP_NO_RESIN=0
     if [ "$_dl_ok" != 1 ]; then
         err "$_dl_label: $T_DL_FAILED"
         if [ "$_dl_badcontent" = 1 ]; then
