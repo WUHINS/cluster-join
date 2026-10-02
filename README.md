@@ -420,19 +420,36 @@ const motdShellPrelude = "for f in /etc/update-motd.d/*; do [ -e \"$f\" ] && [ -
 - **Komari 探针 Web 终端**（agent 自己会跑这批脚本）
 - **SSH 登录**（Debian/Ubuntu 的 pam_motd 也会跑）
 
-钩子内容带 TTY 守卫，避免污染非交互会话：
+钩子内容：
 
 ```sh
 #!/bin/sh
-[ -t 1 ] || exit 0
+PATH="/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
+export PATH
 for _c in fastfetch neofetch; do
     if command -v "$_c" >/dev/null 2>&1; then exec "$_c"; fi
 done
 exit 0
 ```
 
-`[ -t 1 ] || exit 0` 是关键：没有它，`scp` / `rsync` / `ssh host cmd` 的输出会被
-fastfetch 的渲染结果污染（经典翻车点）。实测无 TTY 时输出 0 字节、退出码 0。
+**刻意不做 TTY 判断**。MOTD 有三种生成路径：
+
+| 路径 | 有无终端 |
+| --- | --- |
+| 交互式登录（stdin/stdout 是终端） | 有 |
+| `pam_motd` 把 `update-motd.d` 的输出重定向到管道（多数发行版） | **无** |
+| Debian 由 `/etc/init.d/motd` 在开机时以 root 生成 `/run/motd.dynamic` | **无** |
+
+后两条都没有终端，所以任何 `[ -t 1 ]` 之类的守卫都会让输出进不去，
+表现为 **「root 在探针终端能看到、普通用户 SSH 登录看不到」**。
+MOTD 只在登录时展示、非交互命令的输出会被丢弃，因此默认无条件输出
+（与 fastfetch 官方推荐写法一致）。
+
+> 若你希望只在交互式终端执行（避免 `scp` / `ssh host cmd` 也触发），
+> 取消钩子里那行注释即可：`[ -t 0 ] || [ -t 1 ] || [ -n "${SSH_TTY:-}" ] || exit 0`
+
+另外钩子会**显式把安装目录加进 `PATH`**：`pam_motd` 与 agent 预执行时的
+`PATH` 未必包含 `/usr/local/bin`，只靠 `command -v` 会静默失败。
 
 ---
 

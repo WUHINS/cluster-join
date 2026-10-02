@@ -3248,6 +3248,8 @@ fetch_fastfetch_bin() {
     if [ -n "$_fb_share" ]; then
         run mkdir -p "$FETCH_SHARE_DIR/fastfetch"
         run cp -Rf "$_fb_share/." "$FETCH_SHARE_DIR/fastfetch/" 2>/dev/null || :
+        # 显式放开读/进入权限：安装时的 umask 可能让普通用户读不到 presets
+        run chmod -R a+rX "$FETCH_SHARE_DIR/fastfetch" 2>/dev/null || :
     fi
     [ -x "$FETCH_BIN_DIR/fastfetch" ]
 }
@@ -3314,13 +3316,29 @@ fetch_motd_hook() {
         return 0
     fi
     run mkdir -p "$FETCH_MOTD_DIR"
-    ( umask 022; cat >"$_fm_file" <<'MOTDEOF'
-#!/bin/sh
+    ( umask 022
+      printf '#!/bin/sh\n'
+      # 显式带上安装目录：pam_motd / agent 预执行时的 PATH 未必包含它
+      printf 'PATH="%s:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"\n' "$FETCH_BIN_DIR"
+      printf 'export PATH\n'
+      cat <<'MOTDEOF'
 # Installed by cluster-join.sh
-# Shows system info on interactive login: SSH sessions AND the Komari agent web terminal
-# (komari-agent runs every executable in /etc/update-motd.d/ before starting the shell).
-# The TTY guard keeps non-interactive sessions clean: scp / rsync / 'ssh host cmd'.
-[ -t 1 ] || exit 0
+# 交互式登录时显示系统信息：SSH 登录 与 Komari 探针 web 终端
+# （komari-agent 启动 shell 前会执行 /etc/update-motd.d/ 下所有可执行文件）。
+#
+# 这里刻意不做 TTY 判断。MOTD 的三种生成路径：
+#   1) 交互式登录（stdin/stdout 是终端）
+#   2) pam_motd 把 update-motd.d 的输出重定向到管道（多数发行版）
+#   3) Debian 由 /etc/init.d/motd 在开机时以 root 生成 /run/motd.dynamic
+# 路径 2/3 都没有终端，任何 TTY 守卫都会让输出进不去，
+# 表现为「root 在某些入口能看到、普通用户看不到」。
+# MOTD 只在登录时被展示，非交互命令的输出会被丢弃，
+# 所以这里默认无条件输出（与 fastfetch 官方推荐写法一致）。
+#
+# 若你希望只在交互式终端里执行（避免 scp / 'ssh host cmd' 也触发），
+# 取消下面这行的注释即可：
+# [ -t 0 ] || [ -t 1 ] || [ -n "${SSH_TTY:-}" ] || exit 0
+
 for _c in fastfetch neofetch; do
     if command -v "$_c" >/dev/null 2>&1; then
         exec "$_c"
@@ -3328,8 +3346,16 @@ for _c in fastfetch neofetch; do
 done
 exit 0
 MOTDEOF
-    ) || { err "$T_FETCH_MOTD_FAIL $_fm_file"; return 1; }
+    ) >"$_fm_file" || { err "$T_FETCH_MOTD_FAIL $_fm_file"; return 1; }
+    if [ ! -s "$_fm_file" ]; then
+        err "$T_FETCH_MOTD_FAIL $_fm_file"
+        return 1
+    fi
     run chmod 0755 "$_fm_file"
+    if [ ! -x "$_fm_file" ]; then
+        err "$T_FETCH_MOTD_FAIL $_fm_file"
+        return 1
+    fi
     ok "$T_FETCH_MOTD_OK $_fm_file"
     return 0
 }
