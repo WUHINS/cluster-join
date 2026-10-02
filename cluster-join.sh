@@ -519,6 +519,7 @@ lang_load_en() {
     T_MENU_9='Switch language / 切换语言'
     T_MENU_10='Network & proxy settings (gh-proxy / proxy / Resin)'
     T_MENU_BACK='Back'
+    T_PRESS_ENTER='Press Enter to return to the menu ...'
     T_PM_TITLE='Network & proxy settings'
     T_PM_GH='GitHub acceleration prefix'
     T_PM_MIRROR='Use built-in GitHub mirrors?'
@@ -791,6 +792,7 @@ lang_load_zh() {
     T_MENU_9='切换语言 / Switch language'
     T_MENU_10='网络与代理设置（gh-proxy / 代理 / Resin）'
     T_MENU_BACK='返回'
+    T_PRESS_ENTER='按回车返回主菜单 ...'
     T_PM_TITLE='网络与代理设置'
     T_PM_GH='GitHub 加速前缀'
     T_PM_MIRROR='启用内置 GitHub 镜像？'
@@ -882,7 +884,9 @@ alt_screen_enter() {
     alt_screen_supported || return 0
     ALT_SEQ_ENTER=$(alt_screen_seq smcup "$(printf '\033[?1049h')")
     printf '%s' "$ALT_SEQ_ENTER"
-    printf '\033[2J\033[H'   # 清屏并把光标归位，避免看到上一轮残留
+    # 只把光标归位，不主动清屏：[2J 清的是「当前可见屏」，
+    # 在支持备用屏的终端里多余，在不支持备用屏的终端里会真的抹掉用户屏幕内容。
+    printf '\033[H'
     ALT_SCREEN_ON=1
     return 0
 }
@@ -3484,6 +3488,17 @@ emit_cmd() {
 #-------------------------------------------------------------------------------
 # 18. 交互式菜单
 #-------------------------------------------------------------------------------
+# 让用户读完输出再回主菜单。
+# 菜单在备用屏里，直接重绘会把刚打印在正常屏上的内容盖住——必须给一次暂停。
+press_enter() {
+    [ "$INTERACTIVE" = 1 ] || return 0
+    printf '\n'
+    _wr "$T_PRESS_ENTER"
+    read_line || :
+    printf '\n'
+    return 0
+}
+
 # 显示当前值：空显示「未设置」，密钥只显示首尾
 pm_show() {
     if [ -z "$1" ]; then
@@ -3591,15 +3606,18 @@ interactive_loop() {
             info "$T_EOF_MENU"
             return 0
         fi
+        # 先退出备用屏再执行动作：这样安装日志、状态、汇总都留在正常屏上，
+        # 退出脚本后仍可在 scrollback 里翻到；下一次循环再切回菜单面板。
+        alt_screen_leave
         case "$ANS" in
-            1) ACTION='all';        run_action; save_conf ;;
-            2) ACTION='komari';     run_action; save_conf ;;
-            3) ACTION='easytier';   run_action; save_conf ;;
-            4) ACTION='web';        run_action; save_conf ;;
-            5) do_status ;;
-            6) emit_cmd ;;
-            7) do_uninstall ;;
-            8) ACTION='fetch'; run_action; save_conf ;;
+            1) ACTION='all';        run_action; save_conf; press_enter ;;
+            2) ACTION='komari';     run_action; save_conf; press_enter ;;
+            3) ACTION='easytier';   run_action; save_conf; press_enter ;;
+            4) ACTION='web';        run_action; save_conf; press_enter ;;
+            5) do_status; press_enter ;;
+            6) emit_cmd; press_enter ;;
+            7) do_uninstall; press_enter ;;
+            8) ACTION='fetch'; run_action; save_conf; press_enter ;;
             9) lang_switch_menu ;;
             10) proxy_menu ;;
             0|q|Q|quit|exit) info "$T_BYE"; return 0 ;;
@@ -3613,7 +3631,9 @@ interactive_loop() {
 # 19. 动作分发
 #-------------------------------------------------------------------------------
 run_action() {
-    alt_screen_enter
+    # 刻意不切备用屏：安装日志要留在正常屏的 scrollback 里。
+    # 备用屏只用于「菜单面板」本身，否则动作输出会随退出备用屏一起消失。
+    alt_screen_leave
     case "$ACTION" in
         all)
             preflight
