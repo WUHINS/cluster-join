@@ -1,0 +1,28 @@
+# cluster-batch.sh 主机清单示例
+#
+# 一行一台，支持：
+#   host
+#   host:port
+#   user@host
+#   user@host:port
+#   [IPv6::地址]:port
+# 以 # 开头的行为注释；逗号也可作为分隔符；空行忽略。
+#
+# 用法：
+#   sh cluster-batch.sh -f hosts.txt -j 8 \
+#       --script-url https://your-host/cluster-join.sh \
+#       --komari-endpoint https://komari.example.com --komari-ad-key 'AD-XXXX' \
+#       --komari-no-web-ssh \
+#       --et-config-server udp://10.0.0.1:22020/admin
+
+# ---- 华东集群 ----
+10.0.0.1
+10.0.0.2:2222
+root@10.0.0.3
+
+# ---- 华南集群 ----
+ops@10.0.0.11:2222
+ops@10.0.0.12:2222
+
+# ---- 内网 IPv6 示例 ----
+# root@[2001:db8::10]:22
