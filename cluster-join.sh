@@ -292,7 +292,7 @@ lang_load_en() {
     T_NEED_YES='Non-interactive environment: this operation needs an explicit --yes'
     T_CONFIRM_UNINSTALL='Uninstall the selected components? (y/n)'
     T_BYE='Goodbye!'
-    T_BAD_CHOICE='Invalid choice, please enter 0-8'
+    T_BAD_CHOICE='Invalid choice, please enter 0-9'
     # --- fastfetch / neofetch ---
     T_STEP_FETCH='Installing a system info tool (fastfetch / neofetch)'
     T_FETCH_DONE='Installed:'
@@ -482,6 +482,10 @@ lang_load_en() {
     T_MENU_6='Print the batch deployment command'
     T_MENU_7='Uninstall'
     T_MENU_8='Install fastfetch / neofetch (system info tool)'
+    T_MENU_9='Switch language / 切换语言'
+    T_LANG_CHOOSE='Choose the message language'
+    T_LANG_SWITCHED='Language switched to'
+    T_LANG_SESSION_ONLY='Applies to this run only. To make it permanent: --lang zh|en or CLUSTER_JOIN_LANG=zh|en'
     T_MENU_0='Exit'
     T_MENU_RECOMMENDED='recommended'
     T_MENU_DEFAULT='default'
@@ -521,7 +525,7 @@ lang_load_zh() {
     T_NEED_YES='非交互环境：该操作需要显式加 --yes 才会执行'
     T_CONFIRM_UNINSTALL='确认要卸载所选组件吗？(y/n)'
     T_BYE='再见！'
-    T_BAD_CHOICE='无效选择，请输入 0-8'
+    T_BAD_CHOICE='无效选择，请输入 0-9'
     # --- fastfetch / neofetch ---
     T_STEP_FETCH='安装系统信息工具（fastfetch / neofetch）'
     T_FETCH_DONE='已安装:'
@@ -711,6 +715,10 @@ lang_load_zh() {
     T_MENU_6='输出批量下发命令'
     T_MENU_7='卸载'
     T_MENU_8='安装 fastfetch / neofetch（系统信息工具）'
+    T_MENU_9='切换语言 / Switch language'
+    T_LANG_CHOOSE='请选择消息语言'
+    T_LANG_SWITCHED='语言已切换为'
+    T_LANG_SESSION_ONLY='仅对本次运行生效。要永久生效：--lang zh|en 或 CLUSTER_JOIN_LANG=zh|en'
     T_MENU_0='退出'
     T_MENU_RECOMMENDED='推荐'
     T_MENU_DEFAULT='默认'
@@ -3115,6 +3123,29 @@ emit_cmd() {
 #-------------------------------------------------------------------------------
 # 18. 交互式菜单
 #-------------------------------------------------------------------------------
+# 手动切换消息语言。默认策略是「TTY 一律英文」，这里是给它的显式出口：
+# 只影响本次运行，不写入参数存档，也就不会和自动策略打架。
+lang_switch_menu() {
+    if [ "$MSG_LANG" = zh ]; then
+        choose "$T_LANG_CHOOSE" 2 'English' '中文'
+    else
+        choose "$T_LANG_CHOOSE" 1 'English' '中文'
+    fi
+    case "$ANS" in
+        1) MSG_LANG=en ;;
+        2) MSG_LANG=zh ;;
+        *) return 0 ;;
+    esac
+    lang_load
+    if [ "$MSG_LANG" = zh ]; then
+        info "$T_LANG_SWITCHED 中文"
+    else
+        info "$T_LANG_SWITCHED English"
+    fi
+    dim "$T_LANG_SESSION_ONLY"
+    return 0
+}
+
 interactive_loop() {
     while :; do
         printf '\n'
@@ -3129,6 +3160,7 @@ interactive_loop() {
         printf '  %s6)%s %s\n' "$c_cyn" "$c_rst" "$T_MENU_6"
         printf '  %s7)%s %s\n' "$c_cyn" "$c_rst" "$T_MENU_7"
         printf '  %s8)%s %s\n' "$c_cyn" "$c_rst" "$T_MENU_8"
+        printf '  %s9)%s %s\n' "$c_cyn" "$c_rst" "$T_MENU_9"
         printf '  %s0)%s %s\n' "$c_cyn" "$c_rst" "$T_MENU_0"
         hr
         if ! ask_text "$T_SELECT" '1'; then
@@ -3145,6 +3177,7 @@ interactive_loop() {
             6) emit_cmd ;;
             7) do_uninstall ;;
             8) ACTION='fetch'; run_action; save_conf ;;
+            9) lang_switch_menu ;;
             0|q|Q|quit|exit) info "$T_BYE"; return 0 ;;
             *) warn "$T_BAD_CHOICE" ;;
         esac

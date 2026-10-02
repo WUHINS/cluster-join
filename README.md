@@ -48,6 +48,10 @@ locale 判定顺序：`LC_ALL` → `LC_MESSAGES` → `LANG` → `LANGUAGE` → `
 sudo sh cluster-join.sh --all --yes --lang zh ...   # 非 TTY 也想看中文
 ```
 
+**交互菜单里也能随时切**：主菜单第 9 项 `切换语言 / Switch language`，选完立即用新语言重绘菜单。
+这是给「TTY 一律英文」留的显式出口，只对本次运行生效、不写入参数存档，因此不会和自动策略打架。
+想永久生效就用 `--lang` / `CLUSTER_JOIN_LANG`。
+
 英文模式下所有输出（banner、`--help`、`--status`、日志标签）都是纯 ASCII，便于日志采集和英文终端显示。
 
 ### 1.3 幂等与顺序
