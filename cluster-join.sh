@@ -353,6 +353,13 @@ lang_load_en() {
     T_DL_FAILED='download failed (direct and all mirrors)'
     T_DL_REASONS='per-attempt reason:'
     T_DL_NODIR='destination directory does not exist:'
+    T_BIN_EMPTY='downloaded file is empty:'
+    T_BIN_SMALL='downloaded file is suspiciously small (truncated download?):'
+    T_BIN_NOT_EXEC='downloaded file is not an executable (HTML / error page / captive portal?):'
+    T_BIN_NOT_EXEC_MAGIC='first bytes:'
+    T_BIN_NOT_EXEC_HINT='a captive portal or transparent proxy often returns HTTP 200 with an HTML page; retry with --gh-proxy, --proxy or --resin'
+    T_KOMARI_BIN_BROKEN='the komari-agent binary at this path does not run:'
+    T_KOMARI_BIN_BROKEN_HINT='the download was probably not a real binary; delete it and retry, or use --gh-proxy / --proxy / --resin'
     T_DL_NOWRITE='destination directory is not writable:'
     T_DL_HINT_RESIN='a Resin reverse proxy is configured and may be unreachable:'
     T_DL_HINT_PROXY='a forward proxy is configured and may be unreachable:'
@@ -626,6 +633,13 @@ lang_load_zh() {
     T_DL_FAILED='下载失败（直连与所有镜像均不可用）'
     T_DL_REASONS='逐次失败原因:'
     T_DL_NODIR='目标目录不存在:'
+    T_BIN_EMPTY='下载到的文件为空:'
+    T_BIN_SMALL='下载到的文件异常偏小（可能被截断）:'
+    T_BIN_NOT_EXEC='下载到的不是可执行文件（HTML / 错误页 / 门户页？）:'
+    T_BIN_NOT_EXEC_MAGIC='文件头字节:'
+    T_BIN_NOT_EXEC_HINT='门户页或透明代理常返回 HTTP 200 + 一段 HTML；请改用 --gh-proxy / --proxy / --resin 重试'
+    T_KOMARI_BIN_BROKEN='该路径下的 komari-agent 无法运行:'
+    T_KOMARI_BIN_BROKEN_HINT='下载到的很可能不是真二进制；删掉后重试，或用 --gh-proxy / --proxy / --resin'
     T_DL_NOWRITE='目标目录不可写:'
     T_DL_HINT_RESIN='已配置 Resin 反向代理，可能不可达:'
     T_DL_HINT_PROXY='已配置正向代理，可能不可达:'
@@ -1240,6 +1254,33 @@ wget_reason() {
         6|8) printf '%s' "$T_E_HTTP" ;;
         *) printf '%s %s' "$T_E_OTHER" "$1" ;;
     esac
+}
+
+# 校验拿到的确实是可执行文件（ELF / Mach-O）。
+# 门户页、透明代理、被拦截的下载常常返回 HTTP 200 + 一段 HTML，
+# 若不校验，后面会以「二进制不支持某参数」这种完全误导的方式失败。
+verify_executable() {
+    _ve_file=$1; _ve_label=${2:-binary}
+    if [ ! -s "$_ve_file" ]; then
+        err "$T_BIN_EMPTY $_ve_label"
+        return 1
+    fi
+    # 体积异常偏小 → 下载很可能被截断（这两个二进制都是多 MB 级）
+    _ve_sz=$(wc -c <"$_ve_file" 2>/dev/null | tr -d ' ')
+    case "$_ve_sz" in ''|*[!0-9]*) _ve_sz=0 ;; esac
+    if [ "$_ve_sz" -lt 1048576 ]; then
+        warn "$T_BIN_SMALL $_ve_label $_ve_sz"
+    fi
+    _ve_magic=$(head -c 4 "$_ve_file" 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n')
+    case "$_ve_magic" in
+        7f454c46*) return 0 ;;                                        # ELF
+        cffaedfe*|cefaedfe*|cafebabe*|feedface*|feedfacf*) return 0 ;; # Mach-O / fat
+        '') return 0 ;;   # 取不到魔数（head/od 不可用）时不阻塞流程
+    esac
+    err "$T_BIN_NOT_EXEC $_ve_label"
+    dim "$T_BIN_NOT_EXEC_MAGIC $_ve_magic"
+    dim "$T_BIN_NOT_EXEC_HINT"
+    return 1
 }
 
 # 下载前确认目标目录存在且可写：否则 curl 的写失败会被笼统报成「下载失败」，
@@ -2452,6 +2493,10 @@ install_komari() {
             run rm -f "$_ik_stage"
             return 1
         fi
+        if ! verify_executable "$_ik_stage" 'komari-agent'; then
+            run rm -f "$_ik_stage"
+            return 1
+        fi
         run chmod +x "$_ik_stage"
         if [ "$DRY_RUN" != 1 ]; then
             if ! mv -f "$_ik_stage" "$KOMARI_BIN"; then
@@ -2468,7 +2513,14 @@ install_komari() {
     if [ "$DRY_RUN" = 1 ]; then
         _ik_token='<resolved-at-runtime>'
     else
-        if ! "$KOMARI_BIN" --help 2>&1 | grep -q -- '--config'; then
+        # 先确认这个二进制真能跑起来，再谈它支持哪些参数
+        _ik_help=$("$KOMARI_BIN" --help 2>&1) || :
+        if ! printf '%s' "$_ik_help" | grep -qi 'komari'; then
+            err "$T_KOMARI_BIN_BROKEN $KOMARI_BIN"
+            dim "$T_KOMARI_BIN_BROKEN_HINT"
+            return 1
+        fi
+        if ! printf '%s' "$_ik_help" | grep -q -- '--config'; then
             err "$T_KOMARI_NO_CONFIG_FLAG"
             return 1
         fi
@@ -2789,6 +2841,10 @@ ensure_et_binaries() {
     for _eb_f in $_eb_files; do
         _ie_src=$(find "$_ie_x" -name "$_eb_f" -type f 2>/dev/null | head -n 1)
         if [ -z "$_ie_src" ]; then
+            _ie_missing="$_ie_missing $_eb_f"
+            continue
+        fi
+        if ! verify_executable "$_ie_src" "$_eb_f"; then
             _ie_missing="$_ie_missing $_eb_f"
             continue
         fi
