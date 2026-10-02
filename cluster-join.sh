@@ -74,6 +74,8 @@ GH_KOMARI_REPO='komari-monitor/komari-agent'
 GH_EASYTIER_REPO='EasyTier/EasyTier'
 # 自动 GitHub 加速镜像（按顺序尝试，可用 --gh-proxy 指定或 --no-gh-proxy 关闭）
 GH_MIRRORS_DEFAULT='https://ghfast.top/ https://gh-proxy.com/ https://ghproxy.net/'
+# IPv6 纯机时会被过滤成「实测可达」的子集
+GH_MIRRORS_ACTIVE="$GH_MIRRORS_DEFAULT"
 
 # --- 运行状态变量 ---
 ACTION='auto'            # auto | menu | all | komari | easytier | web | status | uninstall | emit | help
@@ -87,6 +89,11 @@ UNINSTALL_TARGET='all'
 UNINSTALL_PURGE=0
 GH_PROXY=''
 NO_GH_PROXY=0
+IP_FAMILY=${IP_FAMILY:-}          # auto | 4 | 6
+CURL_FAMILY=''                    # 传给 curl/wget 的 -4 / -6
+NET_IPV6_ONLY=0                   # 1 = 本机只有 IPv6
+KOMARI_PREFER_IP=${KOMARI_PREFER_IP:-}
+NO_DOWNLOAD=${NO_DOWNLOAD:-0}      # 1 = 只用预置二进制，不联网下载
 LOG_TO_FILE=0
 SERVICE_MODE=''          # systemd | openrc | procd | manual
 OS_NAME=''
@@ -169,6 +176,7 @@ apply_defaults() {
     [ -n "$WEB_CFG_PROTO" ] || WEB_CFG_PROTO='udp'
     [ -n "$WEB_BIND_ADDR" ] || WEB_BIND_ADDR='0.0.0.0'
     [ -n "$FETCH_TOOL" ] || FETCH_TOOL='auto'
+    [ -n "$IP_FAMILY" ] || IP_FAMILY='auto'
     return 0
 }
 
@@ -312,6 +320,16 @@ lang_load_en() {
     T_ROOT_RERUN='Non-root detected; re-executing with sudo ...'
     T_ROOT_PIPE='Running from a pipe as non-root. Use: curl ... | sudo sh -s -- <args>'
     T_NO_DOWNLOADER='Neither curl nor wget is available and it could not be installed automatically'
+    T_IP_FAMILY_BAD='Invalid --ip-family (expected auto|4|6):'
+    T_NET_IPV6_ONLY='IPv6-only host detected'
+    T_NET_V6_NO_GITHUB='GitHub publishes no AAAA at all (github.com / api.github.com / objects.githubusercontent.com), and the built-in mirrors are IPv4-only. Downloading is impossible from this host.'
+    T_NET_V6_PROBE_SKIP='(dry-run: mirror reachability not probed)'
+    T_NODL_MISSING='--no-download was given but the binary is missing:'
+    T_NODL_USING='--no-download: using the existing binary:'
+    T_NET_V6_MIRRORS='Reachable IPv6 mirrors kept:'
+    T_NET_V6_NO_MIRROR='No IPv6-capable mirror is reachable; downloads cannot proceed.'
+    T_NET_V6_HINT='Workarounds: (1) --gh-proxy URL pointing at an IPv6-capable GitHub proxy; (2) pre-place the binaries (Komari agent, EasyTier core+cli) and re-run with --no-download; (3) NAT64/DNS64, or push from a dual-stack jump host.'
+    T_NET_V6_PREFER='Komari agent will prefer IPv6 for panel connections.'
     T_DL_INSTALLING='curl / wget not found; trying to install one ...'
     T_DL_INSTALLED='Download tool installed:'
     T_NO_UNZIP='Cannot install unzip automatically; please install it manually and retry'
@@ -531,6 +549,16 @@ lang_load_zh() {
     T_ROOT_RERUN='检测到非 root，正在通过 sudo 重新执行 ...'
     T_ROOT_PIPE='当前以管道方式运行且非 root，请改用: curl ... | sudo sh -s -- <参数>'
     T_NO_DOWNLOADER='缺少 curl / wget，且自动安装失败，请手动安装其中之一'
+    T_IP_FAMILY_BAD='--ip-family 取值无效（应为 auto|4|6）:'
+    T_NET_IPV6_ONLY='检测到纯 IPv6 主机'
+    T_NET_V6_NO_GITHUB='GitHub 完全没有 IPv6（github.com / api.github.com / objects.githubusercontent.com 均无 AAAA），内置镜像也全是 IPv4-only。本机无法下载。'
+    T_NET_V6_PROBE_SKIP='（dry-run：未实测镜像可达性）'
+    T_NODL_MISSING='指定了 --no-download，但二进制不存在:'
+    T_NODL_USING='--no-download：使用已有二进制:'
+    T_NET_V6_MIRRORS='保留实测可达的 IPv6 镜像:'
+    T_NET_V6_NO_MIRROR='没有可达的 IPv6 镜像，下载无法进行。'
+    T_NET_V6_HINT='可选办法：(1) 用 --gh-proxy 指定支持 IPv6 的 GitHub 代理；(2) 预置二进制（Komari agent、EasyTier core+cli）后加 --no-download 重跑；(3) 走 NAT64/DNS64，或从双栈跳板机下发。'
+    T_NET_V6_PREFER='Komari Agent 将优先用 IPv6 连接面板。'
     T_DL_INSTALLING='未找到 curl / wget，尝试自动安装 ...'
     T_DL_INSTALLED='已安装下载工具:'
     T_NO_UNZIP='无法自动安装 unzip，请手动安装后重试'
@@ -961,9 +989,11 @@ require_root() {
 http_to_file() {
     _hf_url=$1; _hf_out=$2
     if have curl; then
-        curl -fL --connect-timeout 15 --retry 2 -o "$_hf_out" "$_hf_url" >/dev/null 2>&1
+        # shellcheck disable=SC2086
+        curl $CURL_FAMILY -fL --connect-timeout 15 --retry 2 -o "$_hf_out" "$_hf_url" >/dev/null 2>&1
     elif have wget; then
-        wget -q -T 20 -O "$_hf_out" "$_hf_url" >/dev/null 2>&1
+        # shellcheck disable=SC2086
+        wget $CURL_FAMILY -q -T 20 -O "$_hf_out" "$_hf_url" >/dev/null 2>&1
     else
         return 127
     fi
@@ -973,9 +1003,11 @@ http_to_file() {
 http_to_stdout() {
     _hs_url=$1
     if have curl; then
-        curl -fsSL --connect-timeout 15 "$_hs_url" 2>/dev/null
+        # shellcheck disable=SC2086
+        curl $CURL_FAMILY -fsSL --connect-timeout 15 "$_hs_url" 2>/dev/null
     elif have wget; then
-        wget -q -O - -T 20 "$_hs_url" 2>/dev/null
+        # shellcheck disable=SC2086
+        wget $CURL_FAMILY -q -O - -T 20 "$_hs_url" 2>/dev/null
     else
         return 127
     fi
@@ -990,7 +1022,7 @@ url_candidates() {
     if [ -n "$GH_PROXY" ]; then
         printf '%s\n' "${GH_PROXY%/}/$1"
     fi
-    for _uc_m in $GH_MIRRORS_DEFAULT; do
+    for _uc_m in $GH_MIRRORS_ACTIVE; do
         if [ -n "$GH_PROXY" ] && [ "${_uc_m%/}" = "${GH_PROXY%/}" ]; then
             continue
         fi
@@ -1092,6 +1124,9 @@ ensure_unzip() {
 # 精简镜像（Debian minimal、部分 OpenVZ/LXC 模板）常常 curl 和 wget 一个都没有，
 # 此时不能直接退出，应当像 unzip 那样先尝试自动补装。
 ensure_downloader() {
+    if [ "$NO_DOWNLOAD" = 1 ]; then
+        return 0
+    fi
     if have curl || have wget; then
         return 0
     fi
@@ -1207,6 +1242,76 @@ github_latest_tag() {
     printf '%s' "$_gl_ver"
 }
 
+# 探测本机网络族：输出 46 / 4 / 6 / 空
+net_family_detect() {
+    _nf_v4=0; _nf_v6=0
+    if have ip; then
+        ip -o -4 addr show scope global 2>/dev/null | grep -q . && _nf_v4=1
+        ip -o -6 addr show scope global 2>/dev/null | grep -q . && _nf_v6=1
+    elif have ifconfig; then
+        ifconfig 2>/dev/null | grep -q 'inet ' && _nf_v4=1
+        # 只认全局 IPv6：fe80::/10 是 link-local，几乎每台机器都有，不能当连通性
+        if ifconfig 2>/dev/null | grep 'inet6' | grep -v 'fe80' | grep -vq '::1/'; then
+            _nf_v6=1
+        fi
+    fi
+    # 拿不到接口信息时用连通性兜底。
+    # 必须 --noproxy：否则 -6 探测会被 IPv4-only 的 HTTP 代理"成功"返回，
+    # 从而把只走代理的机器误判成有原生 IPv6。
+    if [ "$_nf_v4" = 0 ] && [ "$_nf_v6" = 0 ] && have curl; then
+        curl -4 --noproxy '*' -s -o /dev/null --connect-timeout 5 http://1.1.1.1 2>/dev/null && _nf_v4=1
+        curl -6 --noproxy '*' -s -o /dev/null --connect-timeout 5 "http://[2606:4700:4700::1111]" 2>/dev/null && _nf_v6=1
+    fi
+    if [ "$_nf_v4" = 1 ] && [ "$_nf_v6" = 1 ]; then printf '46'
+    elif [ "$_nf_v4" = 1 ]; then printf '4'
+    elif [ "$_nf_v6" = 1 ]; then printf '6'
+    fi
+}
+
+# 应用地址族；IPv6 纯机时过滤掉不可达的镜像
+apply_ip_family() {
+    case "$IP_FAMILY" in
+        4) CURL_FAMILY='-4'; NET_IPV6_ONLY=0 ;;
+        6) CURL_FAMILY='-6'; NET_IPV6_ONLY=1 ;;
+        auto|'')
+            case "$(net_family_detect)" in
+                6) CURL_FAMILY='-6'; NET_IPV6_ONLY=1 ;;
+                *) CURL_FAMILY=''; NET_IPV6_ONLY=0 ;;
+            esac
+            ;;
+        *) die "$T_IP_FAMILY_BAD $IP_FAMILY" ;;
+    esac
+
+    if [ "$NET_IPV6_ONLY" = 1 ]; then
+        warn "$T_NET_IPV6_ONLY"
+        dim "$T_NET_V6_NO_GITHUB"
+        # 只有实测可达的镜像才留下：纯 v6 机器上 IPv4-only 的镜像纯属浪费时间
+        if [ "$DRY_RUN" = 1 ]; then
+            dim "$T_NET_V6_PROBE_SKIP"
+        else
+            _af_ok=''
+            for _af_m in $GH_MIRRORS_DEFAULT; do
+                if curl -6 --noproxy '*' -sIL -o /dev/null --connect-timeout 8 "${_af_m%/}/" 2>/dev/null; then
+                    _af_ok="$_af_ok $_af_m"
+                fi
+            done
+            GH_MIRRORS_ACTIVE="$_af_ok"
+            if [ -n "$_af_ok" ]; then
+                dim "$T_NET_V6_MIRRORS$_af_ok"
+            else
+                warn "$T_NET_V6_NO_MIRROR"
+            fi
+        fi
+        dim "$T_NET_V6_HINT"
+        # agent 侧也优先走 IPv6 连面板
+        if [ -z "$KOMARI_PREFER_IP" ]; then
+            KOMARI_PREFER_IP=6
+            dim "$T_NET_V6_PREFER"
+        fi
+    fi
+    return 0
+}
+
 detect_init() {
     if have systemctl && [ -d /run/systemd/system ]; then
         SERVICE_MODE='systemd'; return 0
@@ -1280,6 +1385,9 @@ General:
       --install-service-name N Service name for the Komari agent (default komari-agent)
       --with-fetch             Also install fastfetch/neofetch after a successful join
       --fetch-tool TOOL        auto (default) | fastfetch | neofetch
+      --ip-family FAMILY       auto (default) | 4 | 6 -- force the host IP family
+      --no-download            Never download; require pre-placed binaries
+                               (for IPv6-only / air-gapped hosts)
       --fetch-motd             Install the login hook (default: on)
       --no-fetch-motd          Skip the login hook; install the binary only
       --no-color       Disable colored output (NO_COLOR=1 works too)
@@ -1296,6 +1404,7 @@ Komari Agent:
       --komari-interval SEC   Report interval in seconds (default: 1)
       --komari-version VER    latest (default) | snapshot | a release tag such as 1.5.11
       --komari-force-register Re-register with the panel even if a local token already exists
+      --komari-prefer-ip-version 4|6   Prefer this IP family when connecting to the panel
       --komari-info-interval MIN   Basic info report interval in minutes
       --komari-no-web-ssh     Disable remote control (Web SSH / RCE)
       --komari-insecure       Ignore panel certificate errors (self-signed)
@@ -1400,6 +1509,9 @@ $APP_NAME v$APP_VERSION —— 服务器集群并网（Komari Agent + EasyTier �
       --install-service-name N Komari Agent 服务名（默认 komari-agent）
       --with-fetch             并网成功后追加安装 fastfetch/neofetch
       --fetch-tool TOOL        auto（默认）| fastfetch | neofetch
+      --ip-family FAMILY       auto（默认）| 4 | 6，强制本机地址族
+      --no-download            完全不下载，只使用预置二进制
+                               （供纯 IPv6 / 离线环境使用）
       --fetch-motd             安装登录钩子（默认开启）
       --no-fetch-motd          不装登录钩子，只装二进制
       --no-color       关闭彩色输出（NO_COLOR=1 同理）
@@ -1415,6 +1527,7 @@ Komari Agent:
       --komari-interval SEC   上报间隔秒数（默认 1）
       --komari-version VER     latest（默认）| snapshot | 具体标签，如 1.5.11
       --komari-force-register 即使本机已有令牌也强制重新注册
+      --komari-prefer-ip-version 4|6   连接面板时优先使用的地址族
       --komari-info-interval MIN  基础信息上报间隔分钟
       --komari-no-web-ssh     禁用远程控制（Web SSH / RCE）
       --komari-insecure       忽略面板证书错误（自签证书场景）
@@ -1521,6 +1634,12 @@ parse_args() {
             --fetch-tool)         need_val "$_pa_a" "${2:-}"; FETCH_TOOL=$2; shift ;;
             --fetch-tool=*)       FETCH_TOOL=${_pa_a#*=} ;;
             --fetch-motd)         FETCH_MOTD=1 ;;
+            --no-download)        NO_DOWNLOAD=1 ;;
+            --ip-family)          need_val "$_pa_a" "${2:-}"; IP_FAMILY=$2; shift ;;
+            --ip-family=*)        IP_FAMILY=${_pa_a#*=} ;;
+            --komari-prefer-ip-version)
+                need_val "$_pa_a" "${2:-}"; KOMARI_PREFER_IP=$2; shift ;;
+            --komari-prefer-ip-version=*) KOMARI_PREFER_IP=${_pa_a#*=} ;;
             --no-fetch-motd)      FETCH_MOTD=0 ;;
             --no-service)         SERVICE_MODE='manual' ;;
 
@@ -1633,7 +1752,7 @@ CONF_KEYS='KOMARI_ENDPOINT KOMARI_VERSION KOMARI_INTERVAL KOMARI_INFO_INTERVAL
 KOMARI_DISABLE_WEB_SSH KOMARI_INSECURE KOMARI_DISABLE_AUTOUPDATE KOMARI_EXTRA
 ET_MODE ET_CONFIG_SERVER ET_MACHINE_ID ET_NETWORK_NAME ET_NETWORK_SECRET ET_PEERS
 ET_IPV4 ET_DHCP ET_HOSTNAME ET_EXTRA ET_VERSION ET_LISTEN_PORT
-WEB_DEPLOY WEB_PORT WEB_CFG_PORT WEB_CFG_PROTO WEB_API_HOST GH_PROXY FETCH_TOOL'
+WEB_DEPLOY WEB_PORT WEB_CFG_PORT WEB_CFG_PROTO WEB_API_HOST GH_PROXY FETCH_TOOL IP_FAMILY KOMARI_PREFER_IP'
 
 conf_default_path() {
     if [ "$(id -u)" = 0 ]; then
@@ -1704,6 +1823,7 @@ save_conf() {
 preflight() {
     step "$T_STEP_PREFLIGHT"
     detect_os_arch
+    apply_ip_family
     detect_init
     info "$T_OS_INFO $OS_NAME / $ARCH_RAW / $SERVICE_MODE"
     if [ "$SERVICE_MODE" = 'manual' ]; then
@@ -1838,6 +1958,9 @@ komari_write_cfg() {
         [ "$KOMARI_DISABLE_WEB_SSH" = 1 ] && printf ',\n  "disable_web_ssh": true' >>"$_wc_tmp"
         [ "$KOMARI_INSECURE" = 1 ] && printf ',\n  "ignore_unsafe_cert": true' >>"$_wc_tmp"
         [ "$KOMARI_DISABLE_AUTOUPDATE" = 1 ] && printf ',\n  "disable_auto_update": true' >>"$_wc_tmp"
+        case "$KOMARI_PREFER_IP" in
+            4|6) printf ',\n  "prefer_ip_version": "%s"' "$KOMARI_PREFER_IP" >>"$_wc_tmp" ;;
+        esac
         printf '\n}\n' >>"$_wc_tmp"
     ) || { err "$T_KOMARI_CFG_FAIL $_wc_tmp"; return 1; }
     mv -f "$_wc_tmp" "$KOMARI_AGENT_CFG" 2>/dev/null || return 1
@@ -1947,17 +2070,25 @@ install_komari() {
     # 直接覆盖正在运行的可执行文件会 ETXTBSY（Text file busy）。
     # 所以先下到同目录的暂存名，再用 mv（rename）原子替换——
     # rename 只改目录项，正在运行的进程继续持有旧 inode，不受影响。
-    _ik_stage="$KOMARI_DIR/.agent.new.$$"
-    if ! dl "$_ik_url" "$_ik_stage" 'Komari Agent'; then
-        run rm -f "$_ik_stage"
-        return 1
-    fi
-    run chmod +x "$_ik_stage"
-    if [ "$DRY_RUN" != 1 ]; then
-        if ! mv -f "$_ik_stage" "$KOMARI_BIN"; then
-            err "$T_BIN_REPLACE_FAIL $KOMARI_BIN"
-            rm -f "$_ik_stage"
+    if [ "$NO_DOWNLOAD" = 1 ]; then
+        if [ ! -x "$KOMARI_BIN" ]; then
+            err "$T_NODL_MISSING $KOMARI_BIN"
             return 1
+        fi
+        info "$T_NODL_USING $KOMARI_BIN"
+    else
+        _ik_stage="$KOMARI_DIR/.agent.new.$$"
+        if ! dl "$_ik_url" "$_ik_stage" 'Komari Agent'; then
+            run rm -f "$_ik_stage"
+            return 1
+        fi
+        run chmod +x "$_ik_stage"
+        if [ "$DRY_RUN" != 1 ]; then
+            if ! mv -f "$_ik_stage" "$KOMARI_BIN"; then
+                err "$T_BIN_REPLACE_FAIL $KOMARI_BIN"
+                rm -f "$_ik_stage"
+                return 1
+            fi
         fi
     fi
     ok "$T_BIN_READY $KOMARI_BIN"
@@ -2218,6 +2349,10 @@ ensure_et_binaries() {
             dim "$T_ET_BIN_PRESENT $ET_DIR"
             return 0
         fi
+    fi
+    if [ "$NO_DOWNLOAD" = 1 ]; then
+        err "$T_NODL_MISSING $ET_DIR ($_eb_files)"
+        return 1
     fi
     if ! ensure_unzip; then return 1; fi
 

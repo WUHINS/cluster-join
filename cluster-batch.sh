@@ -322,6 +322,7 @@ Join options (passed through to cluster-join.sh unchanged):
   --et-version --et-extra --gh-proxy --no-gh-proxy
   --et-mode off / --no-easytier   do NOT join the mesh (Komari only)
   --fetch / --with-fetch / --fetch-tool TOOL   install fastfetch / neofetch
+  --ip-family 4|6|auto / --no-download         IPv6-only / offline hosts
 
 Examples:
   sh cluster-batch.sh -f hosts.txt --yes -j 8 \\
@@ -371,6 +372,7 @@ SSH 相关:
   --et-version --et-extra --gh-proxy --no-gh-proxy
   --et-mode off / --no-easytier   不启用并网（仅装 Komari 监控）
   --fetch / --with-fetch / --fetch-tool TOOL   安装 fastfetch / neofetch
+  --ip-family 4|6|auto / --no-download         纯 IPv6 / 离线环境
 
 示例:
   sh cluster-batch.sh -f hosts.txt --yes -j 8 \\
@@ -419,7 +421,7 @@ parse_args() {
             # ---- 无值的布尔开关：原样透传 ----
             --komari-no-web-ssh|--komari-web-ssh|--komari-insecure|--komari-no-autoupdate|\
             --komari-force-register|--no-service|--install-no-mirror|\
-            --fetch|--with-fetch|--fetch-motd|--no-fetch-motd|\
+            --fetch|--with-fetch|--fetch-motd|--no-fetch-motd|--no-download|\
             --no-komari|--no-easytier|--no-et|\
             --et-no-dhcp|--et-dhcp|--no-gh-proxy|--purge|--reset-conf)
                 NODE_ARGS="$NODE_ARGS $_a" ;;
@@ -432,7 +434,7 @@ parse_args() {
             -e|--endpoint|--komari-endpoint|--token|--komari-token|\
             --auto-discovery|--komari-ad-key|--komari-interval|--komari-info-interval|\
             --komari-version|--install-dir|--install-service-name|--install-ghproxy|\
-            --fetch-tool|\
+            --fetch-tool|--ip-family|--komari-prefer-ip-version|\
             --komari-extra|-w|--et-mode|--et-config-server|--et-machine-id|\
             --et-network-name|--et-network-secret|--et-peers|--et-ip|--et-ipv4|\
             --et-hostname|--et-version|--et-extra|--gh-proxy|--uninstall-target|--log|\

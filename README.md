@@ -263,7 +263,39 @@ sudo sh cluster-join.sh --all --yes \
 > 注意：`off` 是会被记住的配置项。如果之前交互式选过「不启用并网」，
 > 后续 `--all --yes` 会沿用该选择并打印跳过提示；显式传 `--et-mode web|peer|server` 可覆盖。
 
-### 3.5 系统信息工具（fastfetch / neofetch）
+### 3.5 纯 IPv6 主机
+
+**实测结论：GitHub 的下载链路完全没有 IPv6**，内置镜像也全是 IPv4-only。
+
+| 源 | AAAA | IPv6 可达 |
+| --- | --- | --- |
+| `github.com` / `api.github.com` / `objects.githubusercontent.com` | 无 | ❌ |
+| `ghfast.top` / `gh-proxy.com` | 无 | ❌ |
+| `ghproxy.net` | 有 | ❌（端点超时） |
+| `raw.githubusercontent.com` | 有 | ✅（但不用于下 release） |
+
+所以**纯 IPv6 机器无法完成下载**。脚本的做法：
+
+- 自动探测本机地址族（`ip`/`ifconfig`；都没有时用 `curl --noproxy` 连通性兜底，
+  避免被 IPv4-only 的 HTTP 代理"成功"返回而误判），可用 `--ip-family 4|6|auto` 强制
+- 判定为纯 IPv6 时：**明确告知不可达原因**、强制 `-6`（避免 IPv4 连接超时）、
+  逐个实测并**剔除不可达的镜像**，并让 Komari Agent 优先用 IPv6 连面板
+- 提供可执行的三条出路：
+
+```sh
+# 1) 自备支持 IPv6 的 GitHub 代理
+... | sudo sh -s -- --all --yes --gh-proxy 'https://你的IPv6代理/' ...
+
+# 2) 预置二进制后完全不下载（也适用于离线/内网机器）
+#    预置：/opt/komari/komari-agent 与 /opt/easytier/{easytier-core,easytier-cli}
+... | sudo sh -s -- --all --yes --no-download -e https://面板 --komari-ad-key 'AD-XXXX'
+
+# 3) 从双栈跳板机用 cluster-batch.sh 下发（节点侧仍受同样限制）
+```
+
+> `--no-download` 下若二进制缺失会明确报错，不会静默跳过。
+
+### 3.6 系统信息工具（fastfetch / neofetch）
 
 和并网无关，但通常顺手装上：
 
@@ -336,6 +368,8 @@ fastfetch 的渲染结果污染（经典翻车点）。实测无 TTY 时输出 0
 | `--status` / `--uninstall` | 查看状态 / 卸载 |
 | `--fetch` | 安装系统信息工具（fastfetch，失败回退 neofetch） |
 | `--with-fetch` | 并网成功后追加安装系统信息工具 |
+| `--ip-family 4\|6\|auto` | 强制本机地址族（默认自动探测） |
+| `--no-download` | 完全不下载，只用预置二进制（纯 IPv6 / 离线环境） |
 | `--fetch-tool TOOL` | `auto`（默认）/ `fastfetch` / `neofetch` |
 | `--fetch-motd` / `--no-fetch-motd` | 是否安装登录钩子（`/etc/update-motd.d/99-fastfetch`），默认装 |
 | `--emit-cmd` | 只打印可下发到其它节点的标准命令，不改动系统 |
