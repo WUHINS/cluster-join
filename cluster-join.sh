@@ -351,6 +351,24 @@ lang_load_en() {
     T_NO_UNZIP='Cannot install unzip automatically; please install it manually and retry'
     T_UNZIP_TRY='unzip / python3 not found, trying to install unzip ...'
     T_DL_FAILED='download failed (direct and all mirrors)'
+    T_DL_REASONS='per-attempt reason:'
+    T_DL_NODIR='destination directory does not exist:'
+    T_DL_NOWRITE='destination directory is not writable:'
+    T_DL_HINT_RESIN='a Resin reverse proxy is configured and may be unreachable:'
+    T_DL_HINT_PROXY='a forward proxy is configured and may be unreachable:'
+    T_DL_HINT_ENVPROXY='the environment sets proxy variables, which curl/wget honor:'
+    T_DL_HINT_NOMIRROR='mirrors are disabled (--no-gh-proxy); only direct GitHub was tried'
+    T_DL_HINT_GENERIC='check outbound connectivity, or route through --proxy / --resin / --gh-proxy'
+    T_E_PROXY_RESOLVE='cannot resolve the proxy host'
+    T_E_RESOLVE='cannot resolve the host (DNS)'
+    T_E_CONNECT='connection failed (unreachable or refused)'
+    T_E_HTTP='HTTP error (403/404/...)'
+    T_E_WRITE='cannot write to the destination'
+    T_E_TIMEOUT='timeout'
+    T_E_TLS='TLS/SSL handshake failed'
+    T_E_RECV='connection reset while receiving'
+    T_E_RESIN='Resin reverse-proxy request failed'
+    T_E_OTHER='failed with exit code'
     T_OS_UNSUPPORTED='Unsupported OS, continuing anyway:'
     # --- 预检 ---
     T_STEP_PREFLIGHT='Environment preflight'
@@ -605,6 +623,24 @@ lang_load_zh() {
     T_NO_UNZIP='无法自动安装 unzip，请手动安装后重试'
     T_UNZIP_TRY='未找到 unzip / python3，尝试自动安装 unzip ...'
     T_DL_FAILED='下载失败（直连与所有镜像均不可用）'
+    T_DL_REASONS='逐次失败原因:'
+    T_DL_NODIR='目标目录不存在:'
+    T_DL_NOWRITE='目标目录不可写:'
+    T_DL_HINT_RESIN='已配置 Resin 反向代理，可能不可达:'
+    T_DL_HINT_PROXY='已配置正向代理，可能不可达:'
+    T_DL_HINT_ENVPROXY='环境变量里设了代理，curl/wget 会使用它们:'
+    T_DL_HINT_NOMIRROR='已禁用镜像（--no-gh-proxy），只尝试了直连'
+    T_DL_HINT_GENERIC='请检查出网连通性，或用 --proxy / --resin / --gh-proxy 指定出口'
+    T_E_PROXY_RESOLVE='无法解析代理主机'
+    T_E_RESOLVE='无法解析主机（DNS）'
+    T_E_CONNECT='连接失败（不可达或被拒绝）'
+    T_E_HTTP='HTTP 错误（403/404 等）'
+    T_E_WRITE='无法写入目标文件'
+    T_E_TIMEOUT='超时'
+    T_E_TLS='TLS/SSL 握手失败'
+    T_E_RECV='接收过程中连接被重置'
+    T_E_RESIN='Resin 反向代理请求失败'
+    T_E_OTHER='失败，退出码'
     T_OS_UNSUPPORTED='未在支持列表内的系统，继续尝试:'
     # --- 预检 ---
     T_STEP_PREFLIGHT='环境预检'
@@ -1176,22 +1212,72 @@ resin_to_stdout() {
     return 1
 }
 
-# http_to_file <url> <out> : 成功返回 0
+# curl 退出码 -> 可读原因（写进全局 HTTP_ERR）
+curl_reason() {
+    case "$1" in
+        5)  printf '%s' "$T_E_PROXY_RESOLVE" ;;
+        6)  printf '%s' "$T_E_RESOLVE" ;;
+        7)  printf '%s' "$T_E_CONNECT" ;;
+        22) printf '%s' "$T_E_HTTP" ;;
+        23) printf '%s' "$T_E_WRITE" ;;
+        28) printf '%s' "$T_E_TIMEOUT" ;;
+        35|51|53|54|55|58|59|60|66|77|80|82|83|90|91) printf '%s' "$T_E_TLS" ;;
+        56) printf '%s' "$T_E_RECV" ;;
+        *)  printf '%s %s' "$T_E_OTHER" "$1" ;;
+    esac
+}
+
+# wget 退出码 -> 可读原因
+wget_reason() {
+    case "$1" in
+        3) printf '%s' "$T_E_WRITE" ;;
+        4) printf '%s' "$T_E_CONNECT" ;;
+        5) printf '%s' "$T_E_TLS" ;;
+        6|8) printf '%s' "$T_E_HTTP" ;;
+        *) printf '%s %s' "$T_E_OTHER" "$1" ;;
+    esac
+}
+
+# 下载前确认目标目录存在且可写：否则 curl 的写失败会被笼统报成「下载失败」，
+# 把人引向网络排查方向。
+dl_precheck_dir() {
+    _dp_dir=$(dirname "$1")
+    if [ ! -d "$_dp_dir" ]; then
+        err "$T_DL_NODIR $_dp_dir"
+        return 1
+    fi
+    if ! ( umask 077; : >"$_dp_dir/.dlwtest.$$" ) 2>/dev/null; then
+        err "$T_DL_NOWRITE $_dp_dir"
+        return 1
+    fi
+    rm -f "$_dp_dir/.dlwtest.$$" 2>/dev/null || :
+    return 0
+}
+
+# http_to_file <url> <out> : 成功返回 0，失败时把原因写入全局 HTTP_ERR
 http_to_file() {
     _hf_url=$1; _hf_out=$2
+    HTTP_ERR=''
     if [ -n "$RESIN_URL" ]; then
-        resin_to_file "$_hf_url" "$_hf_out"
+        resin_to_file "$_hf_url" "$_hf_out" || HTTP_ERR="$T_E_RESIN"
         return $?
     fi
     if have curl; then
         # shellcheck disable=SC2086
-        # shellcheck disable=SC2086
-        curl $CURL_FAMILY $CURL_PROXY_ARGS -fL --connect-timeout 15 --retry 2 -o "$_hf_out" "$_hf_url" >/dev/null 2>&1
+        curl $CURL_FAMILY $CURL_PROXY_ARGS -fL --connect-timeout 15 --retry 2 \
+            -o "$_hf_out" "$_hf_url" >/dev/null 2>&1
+        _hf_rc=$?
+        [ "$_hf_rc" = 0 ] || HTTP_ERR=$(curl_reason "$_hf_rc")
+        return $_hf_rc
     elif have wget; then
         # shellcheck disable=SC2086
         http_proxy="$WGET_PROXY_ENV" https_proxy="$WGET_PROXY_ENV" \
             wget $CURL_FAMILY -q -T 20 -O "$_hf_out" "$_hf_url" >/dev/null 2>&1
+        _hf_rc=$?
+        [ "$_hf_rc" = 0 ] || HTTP_ERR=$(wget_reason "$_hf_rc")
+        return $_hf_rc
     else
+        HTTP_ERR="$T_E_OTHER 127"
         return 127
     fi
 }
@@ -1233,13 +1319,37 @@ url_candidates() {
 }
 
 # dl <url> <out> [标签]
+# 下载失败时给出针对性提示，而不是笼统的「网络不行」
+dl_hint() {
+    if [ -n "$RESIN_URL" ]; then
+        dim "$T_DL_HINT_RESIN $RESIN_URL"
+    fi
+    if [ -n "$PROXY_URL" ]; then
+        dim "$T_DL_HINT_PROXY $PROXY_URL"
+    fi
+    _dh_env=''
+    for _dh_v in http_proxy https_proxy HTTP_PROXY HTTPS_PROXY; do
+        eval "_dh_cur=\${$_dh_v:-}"
+        [ -n "$_dh_cur" ] && _dh_env="$_dh_env $_dh_v=$_dh_cur"
+    done
+    if [ -n "$_dh_env" ]; then
+        dim "$T_DL_HINT_ENVPROXY$_dh_env"
+    fi
+    if [ "$NO_GH_PROXY" = 1 ]; then
+        dim "$T_DL_HINT_NOMIRROR"
+    fi
+    dim "$T_DL_HINT_GENERIC"
+}
+
 dl() {
     _dl_url=$1; _dl_out=$2; _dl_label=${3:-file}
     if [ "$DRY_RUN" = 1 ]; then
         printf '%s[dry-run]%s download %s -> %s\n' "$c_ylw" "$c_rst" "$_dl_url" "$_dl_out"
         return 0
     fi
+    dl_precheck_dir "$_dl_out" || return 1
     _dl_ok=0
+    _dl_reasons=''
     for _dl_u in $(url_candidates "$_dl_url"); do
         dim "$_dl_u"
         rm -f "$_dl_out" 2>/dev/null || :
@@ -1247,10 +1357,23 @@ dl() {
             _dl_ok=1
             break
         fi
+        if [ -n "$HTTP_ERR" ]; then
+            if [ -n "$_dl_reasons" ]; then
+                _dl_reasons="$_dl_reasons
+  - $HTTP_ERR"
+            else
+                _dl_reasons="  - $HTTP_ERR"
+            fi
+        fi
         rm -f "$_dl_out" 2>/dev/null || :
     done
     if [ "$_dl_ok" != 1 ]; then
         err "$_dl_label: $T_DL_FAILED"
+        if [ -n "$_dl_reasons" ]; then
+            dim "$T_DL_REASONS"
+            printf '%s\n' "$_dl_reasons"
+        fi
+        dl_hint
         return 1
     fi
     return 0
