@@ -94,6 +94,14 @@ CURL_FAMILY=''                    # 传给 curl/wget 的 -4 / -6
 NET_IPV6_ONLY=0                   # 1 = 本机只有 IPv6
 KOMARI_PREFER_IP=${KOMARI_PREFER_IP:-}
 NO_DOWNLOAD=${NO_DOWNLOAD:-0}      # 1 = 只用预置二进制，不联网下载
+# 出网代理 / Resin 反向代理
+PROXY_URL=${PROXY_URL:-}           # 正向代理，如 http://127.0.0.1:2260
+PROXY_AUTH=${PROXY_AUTH:-}         # 代理认证（Resin: Platform.Account:TOKEN）
+RESIN_URL=${RESIN_URL:-}           # Resin 反向代理入口，如 http://127.0.0.1:2260
+RESIN_TOKEN=${RESIN_TOKEN:-}       # Resin 反向代理 token（URL 路径段）
+RESIN_ACCOUNT=${RESIN_ACCOUNT:-}   # Resin [Platform.]Account，可选
+CURL_PROXY_ARGS=''
+WGET_PROXY_ENV=''
 LOG_TO_FILE=0
 SERVICE_MODE=''          # systemd | openrc | procd | manual
 OS_NAME=''
@@ -177,6 +185,7 @@ apply_defaults() {
     [ -n "$WEB_BIND_ADDR" ] || WEB_BIND_ADDR='0.0.0.0'
     [ -n "$FETCH_TOOL" ] || FETCH_TOOL='auto'
     [ -n "$IP_FAMILY" ] || IP_FAMILY='auto'
+    build_proxy_args
     return 0
 }
 
@@ -321,6 +330,10 @@ lang_load_en() {
     T_ROOT_PIPE='Running from a pipe as non-root. Use: curl ... | sudo sh -s -- <args>'
     T_NO_DOWNLOADER='Neither curl nor wget is available and it could not be installed automatically'
     T_IP_FAMILY_BAD='Invalid --ip-family (expected auto|4|6):'
+    T_RESIN_NEED_TOKEN='--resin requires --resin-token (the <token> path segment)'
+    T_RESIN_USING='Resin reverse proxy:'
+    T_RESIN_REDIRECT_NOTE='redirects are followed manually so every hop stays inside Resin'
+    T_PROXY_USING='Outbound proxy:'
     T_NET_IPV6_ONLY='IPv6-only host detected'
     T_NET_V6_NO_GITHUB='GitHub publishes no AAAA at all (github.com / api.github.com / objects.githubusercontent.com), and the built-in mirrors are IPv4-only. Downloading is impossible from this host.'
     T_NET_V6_PROBE_SKIP='(dry-run: mirror reachability not probed)'
@@ -554,6 +567,10 @@ lang_load_zh() {
     T_ROOT_PIPE='当前以管道方式运行且非 root，请改用: curl ... | sudo sh -s -- <参数>'
     T_NO_DOWNLOADER='缺少 curl / wget，且自动安装失败，请手动安装其中之一'
     T_IP_FAMILY_BAD='--ip-family 取值无效（应为 auto|4|6）:'
+    T_RESIN_NEED_TOKEN='使用 --resin 时必须同时给 --resin-token（URL 里的 <token> 段）'
+    T_RESIN_USING='Resin 反向代理:'
+    T_RESIN_REDIRECT_NOTE='重定向由脚本自行跟随，保证每一跳都在 Resin 内'
+    T_PROXY_USING='出网代理:'
     T_NET_IPV6_ONLY='检测到纯 IPv6 主机'
     T_NET_V6_NO_GITHUB='GitHub 完全没有 IPv6（github.com / api.github.com / objects.githubusercontent.com 均无 AAAA），内置镜像也全是 IPv4-only。本机无法下载。'
     T_NET_V6_PROBE_SKIP='（dry-run：未实测镜像可达性）'
@@ -993,15 +1010,109 @@ require_root() {
 }
 
 # --- HTTP ---
+# 组装代理参数：curl 用 -x/--proxy-user；wget 只认环境变量且认证需内嵌在 URL 里
+build_proxy_args() {
+    CURL_PROXY_ARGS=''
+    WGET_PROXY_ENV=''
+    [ -n "$PROXY_URL" ] || return 0
+    CURL_PROXY_ARGS="-x $PROXY_URL"
+    if [ -n "$PROXY_AUTH" ]; then
+        CURL_PROXY_ARGS="$CURL_PROXY_ARGS --proxy-user $PROXY_AUTH"
+        case "$PROXY_URL" in
+            *://*) WGET_PROXY_ENV="${PROXY_URL%%://*}://${PROXY_AUTH}@${PROXY_URL#*://}" ;;
+            *)     WGET_PROXY_ENV="$PROXY_URL" ;;
+        esac
+    else
+        WGET_PROXY_ENV="$PROXY_URL"
+    fi
+    return 0
+}
+
+# 把普通 URL 包成 Resin 反向代理 URL：
+#   http://host:port/<token>/[Platform.]Account/<proto>/<target-host><path>
+resin_wrap() {
+    _rw_u=$1
+    case "$_rw_u" in
+        http://*)  _rw_proto=http;  _rw_rest=${_rw_u#http://} ;;
+        https://*) _rw_proto=https; _rw_rest=${_rw_u#https://} ;;
+        *) printf '%s' "$_rw_u"; return 0 ;;
+    esac
+    case "$_rw_rest" in
+        */*) _rw_host=${_rw_rest%%/*}; _rw_path="/${_rw_rest#*/}" ;;
+        *)   _rw_host=$_rw_rest;       _rw_path='' ;;
+    esac
+    printf '%s/%s/%s/%s/%s%s' "${RESIN_URL%/}" "$RESIN_TOKEN" \
+        "${RESIN_ACCOUNT:-.}" "$_rw_proto" "$_rw_host" "$_rw_path"
+}
+
+# Resin 反向代理下自己跟随重定向：curl -L 会把第二跳指向真实主机，从而绕过 Resin。
+# resin_to_file <url> <out>
+resin_to_file() {
+    _rtf_url=$1; _rtf_out=$2
+    _rtf_i=0
+    while [ "$_rtf_i" -lt 6 ]; do
+        _rtf_px=$(resin_wrap "$_rtf_url")
+        # shellcheck disable=SC2086
+        _rtf_res=$(curl $CURL_FAMILY $CURL_PROXY_ARGS -s -o "$_rtf_out" \
+            -w '%{http_code} %{redirect_url}' --connect-timeout 15 "$_rtf_px" 2>/dev/null)
+        _rtf_code=${_rtf_res%% *}
+        _rtf_loc=${_rtf_res#* }
+        case "$_rtf_code" in
+            2*) return 0 ;;
+            3*) [ -n "$_rtf_loc" ] || return 1
+                _rtf_url=$_rtf_loc
+                _rtf_i=$((_rtf_i + 1)) ;;
+            *)  return 1 ;;
+        esac
+    done
+    return 1
+}
+
+# resin_to_stdout <url>
+# 只发一次请求：body 落临时文件，状态码/重定向由 -w 取得，
+# 避免为了探状态码而重复请求（GitHub 未认证 API 只有 60 次/小时）。
+resin_to_stdout() {
+    _rts_url=$1
+    _rts_i=0
+    _rts_tmp="${TMP_DIR:-/tmp}/resin.out.$$"
+    while [ "$_rts_i" -lt 6 ]; do
+        _rts_px=$(resin_wrap "$_rts_url")
+        # shellcheck disable=SC2086
+        _rts_res=$(curl $CURL_FAMILY $CURL_PROXY_ARGS -s -o "$_rts_tmp" \
+            -w '%{http_code} %{redirect_url}' --connect-timeout 15 "$_rts_px" 2>/dev/null)
+        _rts_code=${_rts_res%% *}
+        _rts_loc=${_rts_res#* }
+        case "$_rts_code" in
+            2*)
+                cat "$_rts_tmp" 2>/dev/null
+                rm -f "$_rts_tmp" 2>/dev/null || :
+                return 0 ;;
+            3*) [ -n "$_rts_loc" ] || { rm -f "$_rts_tmp" 2>/dev/null || :; return 1; }
+                _rts_url=$_rts_loc
+                _rts_i=$((_rts_i + 1)) ;;
+            *)  rm -f "$_rts_tmp" 2>/dev/null || :
+                return 1 ;;
+        esac
+    done
+    rm -f "$_rts_tmp" 2>/dev/null || :
+    return 1
+}
+
 # http_to_file <url> <out> : 成功返回 0
 http_to_file() {
     _hf_url=$1; _hf_out=$2
+    if [ -n "$RESIN_URL" ]; then
+        resin_to_file "$_hf_url" "$_hf_out"
+        return $?
+    fi
     if have curl; then
         # shellcheck disable=SC2086
-        curl $CURL_FAMILY -fL --connect-timeout 15 --retry 2 -o "$_hf_out" "$_hf_url" >/dev/null 2>&1
+        # shellcheck disable=SC2086
+        curl $CURL_FAMILY $CURL_PROXY_ARGS -fL --connect-timeout 15 --retry 2 -o "$_hf_out" "$_hf_url" >/dev/null 2>&1
     elif have wget; then
         # shellcheck disable=SC2086
-        wget $CURL_FAMILY -q -T 20 -O "$_hf_out" "$_hf_url" >/dev/null 2>&1
+        http_proxy="$WGET_PROXY_ENV" https_proxy="$WGET_PROXY_ENV" \
+            wget $CURL_FAMILY -q -T 20 -O "$_hf_out" "$_hf_url" >/dev/null 2>&1
     else
         return 127
     fi
@@ -1010,12 +1121,17 @@ http_to_file() {
 # http_to_stdout <url>
 http_to_stdout() {
     _hs_url=$1
+    if [ -n "$RESIN_URL" ]; then
+        resin_to_stdout "$_hs_url"
+        return $?
+    fi
     if have curl; then
         # shellcheck disable=SC2086
-        curl $CURL_FAMILY -fsSL --connect-timeout 15 "$_hs_url" 2>/dev/null
+        curl $CURL_FAMILY $CURL_PROXY_ARGS -fsSL --connect-timeout 15 "$_hs_url" 2>/dev/null
     elif have wget; then
         # shellcheck disable=SC2086
-        wget $CURL_FAMILY -q -O - -T 20 "$_hs_url" 2>/dev/null
+        http_proxy="$WGET_PROXY_ENV" https_proxy="$WGET_PROXY_ENV" \
+            wget $CURL_FAMILY -q -O - -T 20 "$_hs_url" 2>/dev/null
     else
         return 127
     fi
@@ -1290,6 +1406,17 @@ apply_ip_family() {
         *) die "$T_IP_FAMILY_BAD $IP_FAMILY" ;;
     esac
 
+    if [ -n "$RESIN_URL" ] && [ -z "$RESIN_TOKEN" ]; then
+        die "$T_RESIN_NEED_TOKEN"
+    fi
+    if [ -n "$PROXY_URL" ]; then
+        dim "$T_PROXY_USING $PROXY_URL"
+    fi
+    if [ -n "$RESIN_URL" ]; then
+        dim "$T_RESIN_USING $RESIN_URL"
+        dim "$T_RESIN_REDIRECT_NOTE"
+    fi
+
     if [ "$NET_IPV6_ONLY" = 1 ]; then
         warn "$T_NET_IPV6_ONLY"
         dim "$T_NET_V6_NO_GITHUB"
@@ -1396,6 +1523,11 @@ General:
       --ip-family FAMILY       auto (default) | 4 | 6 -- force the host IP family
       --no-download            Never download; require pre-placed binaries
                                (for IPv6-only / air-gapped hosts)
+      --proxy URL              HTTP/SOCKS5 forward proxy, e.g. http://127.0.0.1:2260
+      --proxy-auth USER:PASS   Proxy credentials (Resin: Platform.Account:TOKEN)
+      --resin URL              Resin reverse-proxy base, e.g. http://127.0.0.1:2260
+      --resin-token TOKEN      Resin reverse-proxy token (the <token> path segment)
+      --resin-account ID       Resin [Platform.]Account for sticky sessions (optional)
       --fetch-motd             Install the login hook (default: on)
       --no-fetch-motd          Skip the login hook; install the binary only
       --no-color       Disable colored output (NO_COLOR=1 works too)
@@ -1520,6 +1652,11 @@ $APP_NAME v$APP_VERSION —— 服务器集群并网（Komari Agent + EasyTier �
       --ip-family FAMILY       auto（默认）| 4 | 6，强制本机地址族
       --no-download            完全不下载，只使用预置二进制
                                （供纯 IPv6 / 离线环境使用）
+      --proxy URL              HTTP/SOCKS5 正向代理，如 http://127.0.0.1:2260
+      --proxy-auth USER:PASS   代理认证（Resin 为 Platform.Account:TOKEN）
+      --resin URL              Resin 反向代理入口，如 http://127.0.0.1:2260
+      --resin-token TOKEN      Resin 反向代理 token（URL 里的 <token> 段）
+      --resin-account ID       Resin [Platform.]Account，用于粘性会话（可选）
       --fetch-motd             安装登录钩子（默认开启）
       --no-fetch-motd          不装登录钩子，只装二进制
       --no-color       关闭彩色输出（NO_COLOR=1 同理）
@@ -1643,6 +1780,16 @@ parse_args() {
             --fetch-tool=*)       FETCH_TOOL=${_pa_a#*=} ;;
             --fetch-motd)         FETCH_MOTD=1 ;;
             --no-download)        NO_DOWNLOAD=1 ;;
+            --proxy)              need_val "$_pa_a" "${2:-}"; PROXY_URL=$2; shift ;;
+            --proxy=*)            PROXY_URL=${_pa_a#*=} ;;
+            --proxy-auth)         need_val "$_pa_a" "${2:-}"; PROXY_AUTH=$2; shift ;;
+            --proxy-auth=*)       PROXY_AUTH=${_pa_a#*=} ;;
+            --resin)              need_val "$_pa_a" "${2:-}"; RESIN_URL=$2; shift ;;
+            --resin=*)            RESIN_URL=${_pa_a#*=} ;;
+            --resin-token)        need_val "$_pa_a" "${2:-}"; RESIN_TOKEN=$2; shift ;;
+            --resin-token=*)      RESIN_TOKEN=${_pa_a#*=} ;;
+            --resin-account)      need_val "$_pa_a" "${2:-}"; RESIN_ACCOUNT=$2; shift ;;
+            --resin-account=*)    RESIN_ACCOUNT=${_pa_a#*=} ;;
             --ip-family)          need_val "$_pa_a" "${2:-}"; IP_FAMILY=$2; shift ;;
             --ip-family=*)        IP_FAMILY=${_pa_a#*=} ;;
             --komari-prefer-ip-version)

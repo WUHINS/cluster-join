@@ -299,7 +299,46 @@ sudo sh cluster-join.sh --all --yes \
 
 > `--no-download` 下若二进制缺失会明确报错，不会静默跳过。
 
-### 3.6 系统信息工具（fastfetch / neofetch）
+### 3.6 出网代理与 Resin 反向代理
+
+网络受限（纯 IPv6、内网、需要固定出口 IP）时，可以给脚本的下载流量挂代理。
+
+**正向代理**（最省事，推荐）：
+
+```sh
+# Resin 的正向代理：身份格式 Platform.Account:TOKEN
+... | sudo sh -s -- --all --yes \
+    --proxy http://127.0.0.1:2260 --proxy-auth 'Default.user_tom:my-token' \
+    -e https://面板 --komari-ad-key 'AD-XXXX'
+```
+
+`--proxy` 也接受 `socks5h://host:port`。转发代理天然处理重定向，是下载大文件最稳的方式。
+
+**Resin 反向代理**（URL 式）：
+
+```sh
+... | sudo sh -s -- --all --yes \
+    --resin http://127.0.0.1:2260 --resin-token my-token \
+    --resin-account Default.user_tom \
+    -e https://面板 --komari-ad-key 'AD-XXXX'
+```
+
+脚本会把每个出网 URL 包成 Resin 的 URL 形式：
+
+```
+https://api.github.com/repos/a/b/releases/latest
+  ↓
+http://127.0.0.1:2260/my-token/Default.user_tom/https/api.github.com/repos/a/b/releases/latest
+```
+
+> **为什么要自己跟重定向**：GitHub release 下载会 302 跳到 `objects.githubusercontent.com`。
+> 如果用 `curl -L`，curl 会拿绝对地址直连那一跳，**绕过 Resin**（受限网络下直接失败）。
+> 所以反向代理模式下脚本自己逐跳跟随并重新包装，实测第二跳仍然带着 token 经过 Resin。
+
+**该选哪个**：`--proxy` 正向代理更稳（重定向透明）；`--resin` 反向代理适合客户端只能改 BaseURL、
+无法配置代理的环境。两者可同时使用。
+
+### 3.7 系统信息工具（fastfetch / neofetch）
 
 和并网无关，但通常顺手装上：
 
@@ -374,6 +413,8 @@ fastfetch 的渲染结果污染（经典翻车点）。实测无 TTY 时输出 0
 | `--with-fetch` | 并网成功后追加安装系统信息工具 |
 | `--ip-family 4\|6\|auto` | 强制本机地址族（默认自动探测） |
 | `--no-download` | 完全不下载，只用预置二进制（纯 IPv6 / 离线环境） |
+| `--proxy URL` / `--proxy-auth USER:PASS` | HTTP/SOCKS5 正向代理及其认证 |
+| `--resin URL` / `--resin-token TOKEN` / `--resin-account ID` | Resin 反向代理接入 |
 | `--fetch-tool TOOL` | `auto`（默认）/ `fastfetch` / `neofetch` |
 | `--fetch-motd` / `--no-fetch-motd` | 是否安装登录钩子（`/etc/update-motd.d/99-fastfetch`），默认装 |
 | `--emit-cmd` | 只打印可下发到其它节点的标准命令，不改动系统 |
