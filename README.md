@@ -338,6 +338,12 @@ http://127.0.0.1:2260/my-token/Default.user_tom/https/api.github.com/repos/a/b/r
 **该选哪个**：`--proxy` 正向代理更稳（重定向透明）；`--resin` 反向代理适合客户端只能改 BaseURL、
 无法配置代理的环境。两者可同时使用。
 
+**交互菜单里也能改**：主菜单第 10 项 `网络与代理设置`，可逐项设置 / 清空
+GitHub 加速前缀、内置镜像开关、正向代理及认证、Resin 入口/token/Account。
+改完**立即生效**并写入参数存档（`600`）；token 类字段在界面上只显示首尾。
+对应的命令行参数是 `--gh-proxy` / `--no-gh-proxy` / `--proxy` / `--proxy-auth` /
+`--resin` / `--resin-token` / `--resin-account`。
+
 ### 3.7 系统信息工具（fastfetch / neofetch）
 
 和并网无关，但通常顺手装上：

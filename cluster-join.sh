@@ -88,7 +88,7 @@ NO_ET=0
 UNINSTALL_TARGET='all'
 UNINSTALL_PURGE=0
 GH_PROXY=''
-NO_GH_PROXY=0
+NO_GH_PROXY=${NO_GH_PROXY:-}
 IP_FAMILY=${IP_FAMILY:-}          # auto | 4 | 6
 CURL_FAMILY=''                    # 传给 curl/wget 的 -4 / -6
 NET_IPV6_ONLY=0                   # 1 = 本机只有 IPv6
@@ -185,6 +185,7 @@ apply_defaults() {
     [ -n "$WEB_BIND_ADDR" ] || WEB_BIND_ADDR='0.0.0.0'
     [ -n "$FETCH_TOOL" ] || FETCH_TOOL='auto'
     [ -n "$IP_FAMILY" ] || IP_FAMILY='auto'
+    [ -n "$NO_GH_PROXY" ] || NO_GH_PROXY=0
     build_proxy_args
     return 0
 }
@@ -301,7 +302,7 @@ lang_load_en() {
     T_NEED_YES='Non-interactive environment: this operation needs an explicit --yes'
     T_CONFIRM_UNINSTALL='Uninstall the selected components? (y/n)'
     T_BYE='Goodbye!'
-    T_BAD_CHOICE='Invalid choice, please enter 0-9'
+    T_BAD_CHOICE='Invalid choice, please enter 0-10'
     # --- fastfetch / neofetch ---
     T_STEP_FETCH='Installing a system info tool (fastfetch / neofetch)'
     T_FETCH_DONE='Installed:'
@@ -496,6 +497,23 @@ lang_load_en() {
     T_MENU_7='Uninstall'
     T_MENU_8='Install fastfetch / neofetch (system info tool)'
     T_MENU_9='Switch language / 切换语言'
+    T_MENU_10='Network & proxy settings (gh-proxy / proxy / Resin)'
+    T_MENU_BACK='Back'
+    T_PM_TITLE='Network & proxy settings'
+    T_PM_GH='GitHub acceleration prefix'
+    T_PM_MIRROR='Use built-in GitHub mirrors?'
+    T_PM_PROXY='Forward proxy (http:// or socks5h://)'
+    T_PM_PROXY_AUTH='Forward proxy credentials (Resin: Platform.Account:TOKEN)'
+    T_PM_RESIN='Resin reverse-proxy base URL'
+    T_PM_RESIN_TOKEN='Resin reverse-proxy token'
+    T_PM_RESIN_ACCOUNT='Resin [Platform.]Account (optional)'
+    T_PM_CLEAR='Clear all proxy settings?'
+    T_PM_CLEARED='Proxy settings cleared'
+    T_PM_SAVED='Saved and active for this session'
+    T_PM_NONE='(not set)'
+    T_PM_ON='enabled'
+    T_PM_OFF='disabled'
+    T_PM_BAD='Invalid choice, please enter 0-8'
     T_LANG_CHOOSE='Choose the message language'
     T_LANG_SWITCHED='Language switched to'
     T_LANG_SESSION_ONLY='Applies to this run only. To make it permanent: --lang zh|en or CLUSTER_JOIN_LANG=zh|en'
@@ -538,7 +556,7 @@ lang_load_zh() {
     T_NEED_YES='非交互环境：该操作需要显式加 --yes 才会执行'
     T_CONFIRM_UNINSTALL='确认要卸载所选组件吗？(y/n)'
     T_BYE='再见！'
-    T_BAD_CHOICE='无效选择，请输入 0-9'
+    T_BAD_CHOICE='无效选择，请输入 0-10'
     # --- fastfetch / neofetch ---
     T_STEP_FETCH='安装系统信息工具（fastfetch / neofetch）'
     T_FETCH_DONE='已安装:'
@@ -733,6 +751,23 @@ lang_load_zh() {
     T_MENU_7='卸载'
     T_MENU_8='安装 fastfetch / neofetch（系统信息工具）'
     T_MENU_9='切换语言 / Switch language'
+    T_MENU_10='网络与代理设置（gh-proxy / 代理 / Resin）'
+    T_MENU_BACK='返回'
+    T_PM_TITLE='网络与代理设置'
+    T_PM_GH='GitHub 加速前缀'
+    T_PM_MIRROR='启用内置 GitHub 镜像？'
+    T_PM_PROXY='正向代理（http:// 或 socks5h://）'
+    T_PM_PROXY_AUTH='正向代理认证（Resin 为 Platform.Account:TOKEN）'
+    T_PM_RESIN='Resin 反向代理入口 URL'
+    T_PM_RESIN_TOKEN='Resin 反向代理 token'
+    T_PM_RESIN_ACCOUNT='Resin [Platform.]Account（可选）'
+    T_PM_CLEAR='清空全部代理设置？'
+    T_PM_CLEARED='代理设置已清空'
+    T_PM_SAVED='已保存，本次会话立即生效'
+    T_PM_NONE='(未设置)'
+    T_PM_ON='启用'
+    T_PM_OFF='禁用'
+    T_PM_BAD='无效选择，请输入 0-8'
     T_LANG_CHOOSE='请选择消息语言'
     T_LANG_SWITCHED='语言已切换为'
     T_LANG_SESSION_ONLY='仅对本次运行生效。要永久生效：--lang zh|en 或 CLUSTER_JOIN_LANG=zh|en'
@@ -1907,7 +1942,8 @@ CONF_KEYS='KOMARI_ENDPOINT KOMARI_VERSION KOMARI_INTERVAL KOMARI_INFO_INTERVAL
 KOMARI_DISABLE_WEB_SSH KOMARI_INSECURE KOMARI_DISABLE_AUTOUPDATE KOMARI_EXTRA
 ET_MODE ET_CONFIG_SERVER ET_MACHINE_ID ET_NETWORK_NAME ET_NETWORK_SECRET ET_PEERS
 ET_IPV4 ET_DHCP ET_HOSTNAME ET_EXTRA ET_VERSION ET_LISTEN_PORT
-WEB_DEPLOY WEB_PORT WEB_CFG_PORT WEB_CFG_PROTO WEB_API_HOST GH_PROXY FETCH_TOOL IP_FAMILY KOMARI_PREFER_IP'
+WEB_DEPLOY WEB_PORT WEB_CFG_PORT WEB_CFG_PROTO WEB_API_HOST GH_PROXY NO_GH_PROXY FETCH_TOOL IP_FAMILY KOMARI_PREFER_IP
+PROXY_URL PROXY_AUTH RESIN_URL RESIN_TOKEN RESIN_ACCOUNT'
 
 conf_default_path() {
     if [ "$(id -u)" = 0 ]; then
@@ -3270,6 +3306,66 @@ emit_cmd() {
 #-------------------------------------------------------------------------------
 # 18. 交互式菜单
 #-------------------------------------------------------------------------------
+# 显示当前值：空显示「未设置」，密钥只显示首尾
+pm_show() {
+    if [ -z "$1" ]; then
+        printf '%s' "$T_PM_NONE"
+    elif [ "$2" = 1 ]; then
+        _mask_hint "$1" 1
+    else
+        printf '%s' "$1"
+    fi
+}
+
+# 网络与代理设置（gh-proxy / 正向代理 / Resin 反向代理），改完立即生效并存档
+proxy_menu() {
+    while :; do
+        printf '\n'
+        hr
+        printf '%s  %s%s\n' "$c_bold" "$T_PM_TITLE" "$c_rst"
+        hr
+        printf '  %s1)%s %s  %s[%s]%s\n' "$c_cyn" "$c_rst" "$T_PM_GH" "$c_dim" "$(pm_show "$GH_PROXY" 0)" "$c_rst"
+        if [ "$NO_GH_PROXY" = 1 ]; then
+            printf '  %s2)%s %s  %s[%s]%s\n' "$c_cyn" "$c_rst" "$T_PM_MIRROR" "$c_dim" "$T_PM_OFF" "$c_rst"
+        else
+            printf '  %s2)%s %s  %s[%s]%s\n' "$c_cyn" "$c_rst" "$T_PM_MIRROR" "$c_dim" "$T_PM_ON" "$c_rst"
+        fi
+        printf '  %s3)%s %s  %s[%s]%s\n' "$c_cyn" "$c_rst" "$T_PM_PROXY" "$c_dim" "$(pm_show "$PROXY_URL" 0)" "$c_rst"
+        printf '  %s4)%s %s  %s[%s]%s\n' "$c_cyn" "$c_rst" "$T_PM_PROXY_AUTH" "$c_dim" "$(pm_show "$PROXY_AUTH" 1)" "$c_rst"
+        printf '  %s5)%s %s  %s[%s]%s\n' "$c_cyn" "$c_rst" "$T_PM_RESIN" "$c_dim" "$(pm_show "$RESIN_URL" 0)" "$c_rst"
+        printf '  %s6)%s %s  %s[%s]%s\n' "$c_cyn" "$c_rst" "$T_PM_RESIN_TOKEN" "$c_dim" "$(pm_show "$RESIN_TOKEN" 1)" "$c_rst"
+        printf '  %s7)%s %s  %s[%s]%s\n' "$c_cyn" "$c_rst" "$T_PM_RESIN_ACCOUNT" "$c_dim" "$(pm_show "$RESIN_ACCOUNT" 0)" "$c_rst"
+        printf '  %s8)%s %s\n' "$c_cyn" "$c_rst" "$T_PM_CLEAR"
+        printf '  %s0)%s %s\n' "$c_cyn" "$c_rst" "$T_MENU_BACK"
+        hr
+        if ! ask_text "$T_SELECT" '0'; then
+            return 0
+        fi
+        case "$ANS" in
+            1) ask_text "$T_PM_GH" "$GH_PROXY"; GH_PROXY=$ANS ;;
+            2) ask_yesno "$T_PM_MIRROR" "$([ "$NO_GH_PROXY" = 1 ] && echo n || echo y)"
+               if [ "$ANS" = y ]; then NO_GH_PROXY=0; else NO_GH_PROXY=1; fi ;;
+            3) ask_text "$T_PM_PROXY" "$PROXY_URL"; PROXY_URL=$ANS ;;
+            4) ask_text "$T_PM_PROXY_AUTH" "$PROXY_AUTH" 1; PROXY_AUTH=$ANS ;;
+            5) ask_text "$T_PM_RESIN" "$RESIN_URL"; RESIN_URL=$ANS ;;
+            6) ask_text "$T_PM_RESIN_TOKEN" "$RESIN_TOKEN" 1; RESIN_TOKEN=$ANS ;;
+            7) ask_text "$T_PM_RESIN_ACCOUNT" "$RESIN_ACCOUNT"; RESIN_ACCOUNT=$ANS ;;
+            8) ask_yesno "$T_PM_CLEAR" 'n'
+               if [ "$ANS" = y ]; then
+                   GH_PROXY=''; NO_GH_PROXY=0
+                   PROXY_URL=''; PROXY_AUTH=''
+                   RESIN_URL=''; RESIN_TOKEN=''; RESIN_ACCOUNT=''
+                   info "$T_PM_CLEARED"
+               fi ;;
+            0|q|Q) return 0 ;;
+            *) warn "$T_PM_BAD" ;;
+        esac
+        build_proxy_args     # 立即生效，不必等下次运行
+        save_conf || :
+        dim "$T_PM_SAVED"
+    done
+}
+
 # 手动切换消息语言。默认策略是「TTY 一律英文」，这里是给它的显式出口：
 # 只影响本次运行，不写入参数存档，也就不会和自动策略打架。
 lang_switch_menu() {
@@ -3308,6 +3404,7 @@ interactive_loop() {
         printf '  %s7)%s %s\n' "$c_cyn" "$c_rst" "$T_MENU_7"
         printf '  %s8)%s %s\n' "$c_cyn" "$c_rst" "$T_MENU_8"
         printf '  %s9)%s %s\n' "$c_cyn" "$c_rst" "$T_MENU_9"
+        printf '  %s10)%s %s\n' "$c_cyn" "$c_rst" "$T_MENU_10"
         printf '  %s0)%s %s\n' "$c_cyn" "$c_rst" "$T_MENU_0"
         hr
         if ! ask_text "$T_SELECT" '1'; then
@@ -3325,6 +3422,7 @@ interactive_loop() {
             7) do_uninstall ;;
             8) ACTION='fetch'; run_action; save_conf ;;
             9) lang_switch_menu ;;
+            10) proxy_menu ;;
             0|q|Q|quit|exit) info "$T_BYE"; return 0 ;;
             *) warn "$T_BAD_CHOICE" ;;
         esac
