@@ -468,6 +468,31 @@ MOTD 只在登录时展示、非交互命令的输出会被丢弃，因此默认
 另外钩子会**显式把安装目录加进 `PATH`**：`pam_motd` 与 agent 预执行时的
 `PATH` 未必包含 `/usr/local/bin`，只靠 `command -v` 会静默失败。
 
+#### GNOME 终端新窗口为什么看不到（`--fetch-shellrc`）
+
+**这不是 bug，是登录机制决定的**：MOTD 由 `pam_motd` 在**创建 PAM 会话时**执行，
+而「在桌面环境里新开一个 GNOME 终端窗口」**不会创建 PAM 会话**——
+它只是一个非登录的交互式 shell。所以 `update-motd.d` 那套在这种场景下永远不会被调用。
+
+如果你希望**一开终端就看到**，加 `--fetch-shellrc`：
+
+```bash
+sudo sh cluster-join.sh --fetch --yes --fetch-shellrc
+```
+
+它做两件事：
+
+1. 写 `/etc/profile.d/99-fastfetch.sh`（片段本身只对交互式 shell 生效，
+   并用 `FASTFETCH_SHOWN` 保证每个会话只显示一次）
+2. 往**已存在**的交互式 rc 文件（`/etc/bash.bashrc`、`/etc/zsh/zshrc`、`/etc/zshrc`）
+   追加一行 source。改前会备份成 `<文件>.cluster-join.bak`，且带标记、重复执行不会重复追加
+
+> **与 MOTD 钩子互斥**：rc 钩子的覆盖面是 MOTD 的超集（登录 shell 也会读 rc），
+> 两者同开会让 SSH 登录**显示两次**。所以给 `--fetch-shellrc` 时会自动关掉 MOTD 钩子；
+> 想强行同开就再加 `--fetch-motd`。
+>
+> `--uninstall` 会一并清理片段、rc 里的追加行，还原成原始内容。
+
 ---
 
 ## 4. 参数速查
@@ -487,6 +512,7 @@ MOTD 只在登录时展示、非交互命令的输出会被丢弃，因此默认
 | `--resin URL` / `--resin-token TOKEN` / `--resin-account ID` | Resin 反向代理接入 |
 | `--fetch-tool TOOL` | `auto`（默认）/ `fastfetch` / `neofetch` |
 | `--fetch-motd` / `--no-fetch-motd` | 是否安装登录钩子（`/etc/update-motd.d/99-fastfetch`），默认装 |
+| `--fetch-shellrc` / `--no-fetch-shellrc` | 是否接入交互式 shell rc（覆盖 GNOME 终端新窗口）；启用时默认关掉 MOTD 钩子避免重复显示 |
 | `--emit-cmd` | 只打印可下发到其它节点的标准命令，不改动系统 |
 | `-y, --yes` | 无人值守，所有提问取默认值 |
 | `--lang zh\|en` | 强制指定消息语言（默认 TTY=英文，非 TTY 跟随系统 locale） |

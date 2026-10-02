@@ -174,6 +174,10 @@ WEB_BIND_ADDR=${WEB_BIND_ADDR:-}
 FETCH_TOOL=${FETCH_TOOL:-}                    # auto | fastfetch | neofetch
 WITH_FETCH=${WITH_FETCH:-0}                   # 1 = 并网动作结束后追加安装
 FETCH_MOTD=${FETCH_MOTD:-1}                     # 1 = 安装 MOTD 钩子（探针终端/SSH 登录显示）
+FETCH_MOTD_EXPLICIT=0                           # 用户是否显式指定过 --fetch-motd
+FETCH_SHELLRC=${FETCH_SHELLRC:-0}               # 1 = 安装交互式 shell rc 钩子（含 GNOME 终端新窗口）
+FETCH_SHELLRC_SNIP=${FETCH_SHELLRC_SNIP:-/etc/profile.d/99-fastfetch.sh}
+FETCH_SHELLRC_RCS=${FETCH_SHELLRC_RCS:-/etc/bash.bashrc /etc/zsh/zshrc /etc/zshrc}
 FETCH_MOTD_DIR=${FETCH_MOTD_DIR:-/etc/update-motd.d}
 FETCH_BIN_DIR=${FETCH_BIN_DIR:-/usr/local/bin}
 FETCH_SHARE_DIR=${FETCH_SHARE_DIR:-/usr/local/share}
@@ -209,6 +213,11 @@ apply_defaults() {
     [ -n "$NO_GH_PROXY" ] || NO_GH_PROXY=0
     build_proxy_args
     parse_resin_url
+    # shell rc 钩子覆盖面是 MOTD 钩子的超集（非登录交互式 shell 也覆盖）；
+    # 两者同开会让 SSH 登录显示两次，所以启用 rc 钩子时默认关掉 MOTD 钩子。
+    if [ "$FETCH_SHELLRC" = 1 ] && [ "$FETCH_MOTD_EXPLICIT" != 1 ]; then
+        FETCH_MOTD=0
+    fi
     return 0
 }
 
@@ -342,6 +351,11 @@ lang_load_en() {
     T_FETCH_BIN='Installing the official release:'
     T_FETCH_MOTD_OK='Login hook installed (shows on SSH login and in the Komari web terminal):'
     T_FETCH_MOTD_FAIL='Cannot install the login hook:'
+    T_FETCH_SHELLRC_OK='Interactive-shell hook installed:'
+    T_FETCH_SHELLRC_RC='hooked into interactive shell rc:'
+    T_FETCH_SHELLRC_PRESENT='already hooked:'
+    T_FETCH_SHELLRC_FAIL='Cannot install the interactive-shell hook:'
+    T_FETCH_SHELLRC_REMOVED='Interactive-shell hook removed from:'
     T_NEED_VALUE='option requires a value:'
     T_UNKNOWN_OPT='Unknown option:'
     T_SEE_HELP='(use --help for usage)'
@@ -630,6 +644,11 @@ lang_load_zh() {
     T_FETCH_BIN='安装官方发布物:'
     T_FETCH_MOTD_OK='已装登录钩子（SSH 登录与 Komari 探针终端都会显示）:'
     T_FETCH_MOTD_FAIL='无法安装登录钩子:'
+    T_FETCH_SHELLRC_OK='已装交互式 shell 钩子:'
+    T_FETCH_SHELLRC_RC='已接入交互式 shell rc:'
+    T_FETCH_SHELLRC_PRESENT='已接入过:'
+    T_FETCH_SHELLRC_FAIL='无法安装交互式 shell 钩子:'
+    T_FETCH_SHELLRC_REMOVED='已从以下文件移除交互式 shell 钩子:'
     T_NEED_VALUE='选项缺少取值:'
     T_UNKNOWN_OPT='未知选项:'
     T_SEE_HELP='（用 --help 查看帮助）'
@@ -1925,6 +1944,10 @@ General:
       --resin-account ID       Resin [Platform.]Account for sticky sessions (optional)
       --fetch-motd             Install the login hook (default: on)
       --no-fetch-motd          Skip the login hook; install the binary only
+      --fetch-shellrc          Also hook interactive shells (covers new GNOME
+                               Terminal windows, which are not login sessions);
+                               implies --no-fetch-motd unless given explicitly
+      --no-fetch-shellrc       Do not touch shell rc files (default)
       --no-color       Disable colored output (NO_COLOR=1 works too)
       --log FILE       Also append to this log file (default $LOG_FILE)
       --reset-conf     Ignore and delete the saved configuration
@@ -2057,6 +2080,10 @@ $APP_NAME v$APP_VERSION —— 服务器集群并网（Komari Agent + EasyTier �
       --resin-account ID       Resin [Platform.]Account，用于粘性会话（可选）
       --fetch-motd             安装登录钩子（默认开启）
       --no-fetch-motd          不装登录钩子，只装二进制
+      --fetch-shellrc          同时接入交互式 shell（覆盖 GNOME 终端新窗口——
+                               它不是登录会话）；除非显式给 --fetch-motd，
+                               否则会自动关掉登录钩子以避免重复显示
+      --no-fetch-shellrc       不改动 shell rc（默认）
       --no-color       关闭彩色输出（NO_COLOR=1 同理）
       --log FILE       同时写入日志文件（默认 $LOG_FILE）
       --reset-conf     忽略并删除已保存的配置
@@ -2176,7 +2203,9 @@ parse_args() {
             --with-fetch)         WITH_FETCH=1 ;;
             --fetch-tool)         need_val "$_pa_a" "${2:-}"; FETCH_TOOL=$2; shift ;;
             --fetch-tool=*)       FETCH_TOOL=${_pa_a#*=} ;;
-            --fetch-motd)         FETCH_MOTD=1 ;;
+            --fetch-motd)         FETCH_MOTD=1; FETCH_MOTD_EXPLICIT=1 ;;
+            --fetch-shellrc)      FETCH_SHELLRC=1 ;;
+            --no-fetch-shellrc)   FETCH_SHELLRC=0 ;;
             --no-download)        NO_DOWNLOAD=1 ;;
             --alt-screen)         ALT_SCREEN=1 ;;
             --no-alt-screen)      ALT_SCREEN=0 ;;
@@ -3387,6 +3416,84 @@ fetch_report() {
     fi
 }
 
+# shell rc 钩子：覆盖「非登录交互式 shell」。
+# GNOME 终端新开窗口不创建 PAM 会话，pam_motd / update-motd.d 根本不会被执行，
+# 所以那种场景只能靠 shell 自己的 rc 文件。
+fetch_shellrc_hook() {
+    _fs_snip=$FETCH_SHELLRC_SNIP
+    if [ "$DRY_RUN" = 1 ]; then
+        printf '%s[dry-run]%s write %s\n' "$c_ylw" "$c_rst" "$_fs_snip"
+        printf '%s[dry-run]%s append a source line to existing interactive rc files\n' "$c_ylw" "$c_rst"
+        return 0
+    fi
+    run mkdir -p "$(dirname "$_fs_snip")"
+    ( umask 022
+      printf '#!/bin/sh\n'
+      printf 'PATH="%s:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"\n' "$FETCH_BIN_DIR"
+      printf 'export PATH\n'
+      cat <<'RCEOF'
+# Installed by cluster-join.sh (--fetch-shellrc)
+# 交互式 shell 启动时显示系统信息。放在 rc 里是为了覆盖
+# 「非登录交互式 shell」——GNOME 终端新窗口正是这种，
+# 它不创建 PAM 会话，因此 pam_motd / update-motd.d 不会被执行。
+# 仅交互式 shell 生效；每个会话只显示一次（FASTFETCH_SHOWN 去重）。
+case "$-" in
+    *i*) ;;
+    *) return 0 2>/dev/null || true ;;
+esac
+if [ -n "${FASTFETCH_SHOWN:-}" ]; then
+    return 0 2>/dev/null || true
+fi
+FASTFETCH_SHOWN=1
+export FASTFETCH_SHOWN
+for _c in fastfetch neofetch; do
+    if command -v "$_c" >/dev/null 2>&1; then
+        "$_c"
+        break
+    fi
+done
+RCEOF
+    ) >"$_fs_snip" || { err "$T_FETCH_SHELLRC_FAIL $_fs_snip"; return 1; }
+    [ -s "$_fs_snip" ] || { err "$T_FETCH_SHELLRC_FAIL $_fs_snip"; return 1; }
+    run chmod 0644 "$_fs_snip"
+    # 让非登录交互式 shell 也跑到：往已存在的 rc 文件追加一行 source
+    for _fs_rc in $FETCH_SHELLRC_RCS; do
+        [ -f "$_fs_rc" ] || continue
+        if grep -q 'cluster-join fetch snippet' "$_fs_rc" 2>/dev/null; then
+            dim "$T_FETCH_SHELLRC_PRESENT $_fs_rc"
+            continue
+        fi
+        # 改系统文件前先备份一次
+        if [ ! -f "$_fs_rc.cluster-join.bak" ]; then
+            run cp -a "$_fs_rc" "$_fs_rc.cluster-join.bak" || :
+        fi
+        ( umask 022
+          printf '\n# cluster-join fetch snippet\n'
+          printf '[ -f %s ] && . %s\n' "$_fs_snip" "$_fs_snip"
+        ) >>"$_fs_rc" || { warn "$T_FETCH_SHELLRC_FAIL $_fs_rc"; continue; }
+        ok "$T_FETCH_SHELLRC_RC $_fs_rc"
+    done
+    ok "$T_FETCH_SHELLRC_OK $_fs_snip"
+    return 0
+}
+
+# 卸载时清理两个登录钩子（原先完全没有清理，会留下悬空引用）
+fetch_hooks_remove() {
+    run rm -f "$FETCH_MOTD_DIR/99-fastfetch"
+    run rm -f "$FETCH_SHELLRC_SNIP"
+    for _fr_rc in $FETCH_SHELLRC_RCS; do
+        [ -f "$_fr_rc" ] || continue
+        grep -q 'cluster-join fetch snippet' "$_fr_rc" 2>/dev/null || continue
+        # 删掉「# cluster-join fetch snippet」标记行与其后紧跟的 source 行
+        if have sed; then
+            sed -i.cluster-join.tmp '/# cluster-join fetch snippet/{N;d;}' "$_fr_rc" 2>/dev/null || :
+            rm -f "$_fr_rc.cluster-join.tmp" 2>/dev/null || :
+        fi
+        ok "$T_FETCH_SHELLRC_REMOVED $_fr_rc"
+    done
+    return 0
+}
+
 install_fetch() {
     step "$T_STEP_FETCH"
     _if_tool=''
@@ -3414,9 +3521,12 @@ install_fetch() {
         return 1
     fi
     fetch_report "$_if_tool"
-    # 让它在登录时真正显示（探针 web 终端 + SSH），而不只是躺在 PATH 里
+# 让它在登录时真正显示（探针 web 终端 + SSH），而不只是躺在 PATH 里
     if [ "$FETCH_MOTD" = 1 ]; then
         fetch_motd_hook || :
+    fi
+    if [ "$FETCH_SHELLRC" = 1 ]; then
+        fetch_shellrc_hook || :
     fi
     return 0
 }
@@ -3612,6 +3722,8 @@ do_uninstall() {
     if ! confirm_or_die "$T_CONFIRM_UNINSTALL"; then
         return 1
     fi
+
+    fetch_hooks_remove
 
     case "$UNINSTALL_TARGET" in
         all|komari)
