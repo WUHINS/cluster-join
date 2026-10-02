@@ -398,6 +398,20 @@ sudo sh cluster-join.sh --fetch --fetch-tool neofetch --yes
 | fastfetch | `apt` / `dnf` / `yum` / `zypper` / `pacman` / `apk` / `opkg` / `brew` | GitHub Releases 的 `fastfetch-linux-<arch>.tar.gz`（静态二进制），落到 `/usr/local/bin/fastfetch`，presets 落到 `/usr/local/share/fastfetch` |
 | neofetch | 同上 | GitHub Archives 的 7.1.0 源码包里的单文件 bash 脚本，落到 `/usr/local/bin/neofetch` |
 
+**下载全程可走 GitHub 加速**。fastfetch 用的是 `releases/latest/download/<asset>` 直链，
+**刻意不查 `api.github.com`**——实测加速镜像基本都拒绝 API：
+
+| 用途 | 直连 | ghfast.top | gh-proxy.com | ghproxy.net |
+| --- | --- | --- | --- | --- |
+| `api.github.com` 查版本 | 200 | **403** | 200 | **403** |
+| `releases/latest/download/<asset>` | 200 | **200** | 200 | 200 |
+
+所以 `--gh-proxy https://ghfast.top/` 这类只放行资源直链的镜像，现在也能装 fastfetch。
+版本号改为装完后由二进制自报（`fastfetch --version`），比查 API 更准。
+
+tar.gz 也会做**内容校验**（gzip 魔数 `1f8b`）：门户页/透明代理返回的 HTML 会被当场识破并
+**自动换下一个源**，而不是等到 `tar` 报"解包失败"。
+
 支持的 fastfetch 预编译架构：`amd64` / `aarch64` / `armv7l` / `i686` / `loongarch64` / `ppc64le` / `riscv64` / `s390x`。
 neofetch 是 bash 脚本，没有 bash 的系统会明确报错而不是装一半。
 

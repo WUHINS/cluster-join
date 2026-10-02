@@ -343,7 +343,6 @@ lang_load_en() {
     T_FETCH_FAIL='Failed to install the system info tool'
     T_FETCH_TOOL_BAD='Invalid --fetch-tool (expected auto|fastfetch|neofetch):'
     T_FETCH_ARCH_UNSUPPORTED='No prebuilt fastfetch binary for this architecture:'
-    T_FETCH_TAG_FAIL='Cannot resolve the latest release tag for:'
     T_FETCH_UNPACK_FAIL='Failed to unpack the archive:'
     T_FETCH_NO_BIN='Executable not found in the archive:'
     T_FETCH_NEED_BASH='neofetch is a bash script but bash is not available'
@@ -392,9 +391,9 @@ lang_load_en() {
     T_DL_NODIR='destination directory does not exist:'
     T_BIN_EMPTY='downloaded file is empty:'
     T_BIN_SMALL='downloaded file is suspiciously small (truncated download?):'
-    T_DL_BAD_CONTENT='HTTP 200 but the content is not a binary; trying the next source:'
+    T_DL_BAD_CONTENT='HTTP 200 but the content does not match the expected type; trying the next source:'
     T_DL_BYTES='bytes, magic'
-    T_DL_ALL_BAD_CONTENT='every source returned a non-binary response; a captive portal or interception is likely'
+    T_DL_ALL_BAD_CONTENT='every source returned a mismatched response; a captive portal or interception is likely'
     T_BIN_NOT_EXEC='downloaded file is not an executable (HTML / error page / captive portal?):'
     T_BIN_NOT_EXEC_MAGIC='first bytes:'
     T_BIN_NOT_EXEC_HINT='a captive portal or transparent proxy often returns HTTP 200 with an HTML page; retry with --gh-proxy, --proxy or --resin'
@@ -636,7 +635,6 @@ lang_load_zh() {
     T_FETCH_FAIL='系统信息工具安装失败'
     T_FETCH_TOOL_BAD='--fetch-tool 取值无效（应为 auto|fastfetch|neofetch）:'
     T_FETCH_ARCH_UNSUPPORTED='该架构没有 fastfetch 预编译二进制:'
-    T_FETCH_TAG_FAIL='无法解析最新 release 标签:'
     T_FETCH_UNPACK_FAIL='解压失败:'
     T_FETCH_NO_BIN='压缩包中未找到可执行文件:'
     T_FETCH_NEED_BASH='neofetch 是 bash 脚本，但系统没有 bash'
@@ -685,9 +683,9 @@ lang_load_zh() {
     T_DL_NODIR='目标目录不存在:'
     T_BIN_EMPTY='下载到的文件为空:'
     T_BIN_SMALL='下载到的文件异常偏小（可能被截断）:'
-    T_DL_BAD_CONTENT='返回 HTTP 200 但内容不是二进制，换下一个源:'
+    T_DL_BAD_CONTENT='返回 HTTP 200 但内容类型不符（可能是门户页），换下一个源:'
     T_DL_BYTES='字节，文件头'
-    T_DL_ALL_BAD_CONTENT='所有源返回的都不是二进制，很可能被门户页 / 劫持拦截'
+    T_DL_ALL_BAD_CONTENT='所有源返回的内容类型都不对，很可能被门户页 / 劫持拦截'
     T_BIN_NOT_EXEC='下载到的不是可执行文件（HTML / 错误页 / 门户页？）:'
     T_BIN_NOT_EXEC_MAGIC='文件头字节:'
     T_BIN_NOT_EXEC_HINT='门户页或透明代理常返回 HTTP 200 + 一段 HTML；请改用 --gh-proxy / --proxy / --resin 重试'
@@ -1374,6 +1372,15 @@ is_executable_file() {
     return 1
 }
 
+# 按期望类型校验下载内容：binary=ELF/Mach-O，gzip=gzip 头
+file_expect_ok() {
+    case "$2" in
+        binary) is_executable_file "$1" ;;
+        gzip)   case "$(file_magic "$1")" in 1f8b*) return 0 ;; esac; return 1 ;;
+        *)      return 0 ;;
+    esac
+}
+
 verify_executable() {
     _ve_file=$1; _ve_label=${2:-binary}
     if [ ! -s "$_ve_file" ]; then
@@ -1551,7 +1558,7 @@ dl() {
             dim "$_dl_u"
             rm -f "$_dl_out" 2>/dev/null || :
             if http_to_file "$_dl_u" "$_dl_out" && [ -s "$_dl_out" ]; then
-                if [ "$_dl_expect" = binary ] && ! is_executable_file "$_dl_out"; then
+                if [ -n "$_dl_expect" ] && ! file_expect_ok "$_dl_out" "$_dl_expect"; then
                     _dl_badcontent=1
                     warn "$T_DL_BAD_CONTENT $_dl_u ($(wc -c <"$_dl_out" 2>/dev/null | tr -d ' ') $T_DL_BYTES $(file_magic "$_dl_out"))"
                     rm -f "$_dl_out" 2>/dev/null || :
@@ -1758,22 +1765,6 @@ et_latest_version() {
         case "$_ev_ver" in v[0-9]*) : ;; *) _ev_ver='' ;; esac
     fi
     printf '%s' "$_ev_ver"
-}
-
-# 解析任意 GitHub 仓库的最新 release tag
-github_latest_tag() {
-    _gl_repo=$1
-    _gl_ver=''
-    for _gl_u in $(url_candidates "https://api.github.com/repos/$_gl_repo/releases/latest"); do
-        _gl_json=$(http_to_stdout "$_gl_u" || :)
-        [ -n "$_gl_json" ] || continue
-        _gl_ver=$(printf '%s' "$_gl_json" \
-            | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' \
-            | head -n 1 | sed 's/.*"\([^"]*\)".*/\1/')
-        [ -n "$_gl_ver" ] && break
-    done
-    [ -n "$_gl_ver" ] || return 1
-    printf '%s' "$_gl_ver"
 }
 
 # 探测本机网络族：输出 46 / 4 / 6 / 空
@@ -3266,14 +3257,15 @@ fetch_fastfetch_bin() {
         warn "$T_FETCH_ARCH_UNSUPPORTED $ARCH_RAW"
         return 1
     }
-    _fb_ver=$(github_latest_tag 'fastfetch-cli/fastfetch') || {
-        err "$T_FETCH_TAG_FAIL fastfetch"
-        return 1
-    }
-    _fb_url="https://github.com/fastfetch-cli/fastfetch/releases/download/${_fb_ver}/fastfetch-linux-${_fb_arch}.tar.gz"
+    # 刻意不查 api.github.com：GitHub 加速镜像基本都拒绝 API
+    # （实测 ghfast.top / ghproxy.net 对 api.github.com 返回 403，
+    #   只有 gh-proxy.com 放行），而 releases/latest/download/<asset>
+    # 的资源直链经镜像可以正常代理（实测 200）。
+    # 用这个写法，fastfetch 的安装全程都能走 --gh-proxy / 内置镜像。
+    _fb_url="https://github.com/fastfetch-cli/fastfetch/releases/latest/download/fastfetch-linux-${_fb_arch}.tar.gz"
     _fb_tar="${TMP_DIR}/fastfetch.tar.gz"
-    dim "$T_FETCH_BIN fastfetch $_fb_ver ($_fb_arch)"
-    dl "$_fb_url" "$_fb_tar" 'fastfetch' || return 1
+    dim "$T_FETCH_BIN fastfetch ($_fb_arch)"
+    dl "$_fb_url" "$_fb_tar" 'fastfetch' gzip || return 1
     [ "$DRY_RUN" = 1 ] && return 0
 
     _fb_dir="${TMP_DIR}/fastfetch.x"
@@ -3290,6 +3282,9 @@ fetch_fastfetch_bin() {
     run mkdir -p "$FETCH_BIN_DIR"
     run cp -f "$_fb_bin" "$FETCH_BIN_DIR/fastfetch"
     run chmod 0755 "$FETCH_BIN_DIR/fastfetch"
+    if [ "$DRY_RUN" != 1 ] && [ -x "$FETCH_BIN_DIR/fastfetch" ]; then
+        dim "$T_FETCH_ALREADY fastfetch $("$FETCH_BIN_DIR/fastfetch" --version 2>/dev/null | head -n 1)"
+    fi
     # presets/completions（可选）
     _fb_share=$(find "$_fb_dir" -path '*/usr/share/fastfetch' -type d 2>/dev/null | head -n 1)
     if [ -n "$_fb_share" ]; then
@@ -3329,7 +3324,7 @@ install_neofetch() {
     fi
     _nb_tar="${TMP_DIR}/neofetch.tar.gz"
     dim "$T_FETCH_BIN neofetch 7.1.0"
-    dl "https://github.com/dylanaraps/neofetch/archive/refs/tags/7.1.0.tar.gz" "$_nb_tar" 'neofetch' || return 1
+    dl "https://github.com/dylanaraps/neofetch/archive/refs/tags/7.1.0.tar.gz" "$_nb_tar" 'neofetch' gzip || return 1
     [ "$DRY_RUN" = 1 ] && return 0
 
     _nb_dir="${TMP_DIR}/neofetch.x"
